@@ -5,3 +5,9 @@ dist/
 .DS_Store
 :memory:.ses
 tools/__pycache__/
+
+# Model weights (download separately — see public/models/README.md)
+public/models/**/*.onnx
+public/models/**/*.onnx_data
+public/models/privacy-filter/tokenizer.json
+tools/has/*.pt
