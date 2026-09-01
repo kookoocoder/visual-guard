@@ -13,6 +13,7 @@
     "onnxruntime-web": "^1.29.0"
   },
   "devDependencies": {
-    "vite": "^6.0.11"
-  }
+    "vite": "^6.4.3"
+  },
+  "packageManager": "bun@1.4.0"
 }
