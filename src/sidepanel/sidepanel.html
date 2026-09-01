@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <span class="dot" id="status-dot"></span>
+    <h1>Privacy Agent</h1>
+  </header>
+
+  <section id="task-box">
+    <textarea id="task" placeholder="Describe the task"></textarea>
+    <button id="run">Run</button>
+  </section>
+
+  <details id="models-panel" open>
+    <summary>Local models</summary>
+    <div class="model-row">
+      <span class="dot" id="has-dot"></span>
+      <span>HaS image segmentation</span>
+      <button id="test-has" class="test">Test</button>
+    </div>
+    <p class="detail" id="has-detail"></p>
+    <div class="model-row">
+      <span class="dot" id="ner-dot"></span>
+      <span>PII text filter</span>
+      <button id="test-ner" class="test">Test</button>
+    </div>
+    <p class="detail" id="ner-detail"></p>
+  </details>
+
+  <details id="tools-panel">
+    <summary>Tools</summary>
+    <div class="tool-row"><span>get_page_state</span><button class="test" data-tool="get_page_state">Test</button></div>
+    <div class="tool-row"><span>read_element</span><button class="test" data-tool="read_element">Test</button></div>
+    <div class="tool-row"><span>click</span><button class="test" data-tool="click">Test</button></div>
+    <div class="tool-row"><span>type</span><button class="test" data-tool="type">Test</button></div>
+    <div class="tool-row"><span>scroll</span><button class="test" data-tool="scroll">Test</button></div>
+    <div class="tool-row"><span>navigate</span><button class="test" data-tool="navigate">Test</button></div>
+    <div class="tool-row"><span>screenshot</span><button class="test" data-tool="screenshot">Test</button></div>
+  </details>
+
+  <details id="log-panel" open>
+    <summary>Agent log</summary>
+    <div id="log"></div>
+  </details>
+
+  <div id="preview">
+    <img id="preview-img" alt="" />
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

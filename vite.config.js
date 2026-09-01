@@ -11,7 +11,16 @@ export default defineConfig({
     outDir: resolve(projectRoot, "dist"),
     emptyOutDir: true,
     rollupOptions: {
-      input: resolve(projectRoot, "src/sidepanel/sidepanel.html"),
+      input: {
+        sidepanel: resolve(projectRoot, "src/sidepanel/sidepanel.html"),
+        background: resolve(projectRoot, "src/background.js"),
+        content: resolve(projectRoot, "src/content.js"),
+      },
+      output: {
+        entryFileNames: "[name].js",
+        chunkFileNames: "chunks/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
+      },
     },
   },
 });
