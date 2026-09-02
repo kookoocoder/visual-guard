@@ -8,7 +8,8 @@
     "sidePanel",
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
