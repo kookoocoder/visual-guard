@@ -1,13 +1,29 @@
 import { pipeline, env } from "@huggingface/transformers";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve, sep } from "node:path";
 
 env.allowLocalModels = true;
 env.allowRemoteModels = false;
-env.localModelPath = "/models/";
-if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
-  env.backends.onnx.wasm.wasmPaths = {
-    mjs: "/wasm/v126/ort-wasm-simd-threaded.asyncify.mjs",
-    wasm: "/wasm/v126/ort-wasm-simd-threaded.asyncify.wasm",
-  };
+
+const inExtension = Boolean(globalThis.chrome?.runtime?.getURL);
+if (inExtension) {
+  env.localModelPath = "/models/";
+  if (env.backends?.onnx?.wasm) {
+    env.backends.onnx.wasm.wasmPaths = {
+      mjs: "/wasm/v126/ort-wasm-simd-threaded.asyncify.mjs",
+      wasm: "/wasm/v126/ort-wasm-simd-threaded.asyncify.wasm",
+    };
+  }
+} else {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const base = root.split(sep).join("/");
+  env.localModelPath = `${base}/public/models/`;
+  if (env.backends?.onnx?.wasm) {
+    env.backends.onnx.wasm.wasmPaths = {
+      mjs: `${base}/public/wasm/v126/ort-wasm-simd-threaded.asyncify.mjs`,
+      wasm: `${base}/public/wasm/v126/ort-wasm-simd-threaded.asyncify.wasm`,
+    };
+  }
 }
 
 let classifier = null;
@@ -15,9 +31,11 @@ let loadedBackend = null;
 
 export async function loadNER() {
   if (classifier) return classifier;
-  classifier = await pipeline("token-classification", "openai/privacy-filter", {
+  classifier = await pipeline("token-classification", "privacy-filter", {
     device: "webgpu",
-    dtype: "q4",
+    dtype: "q4f16",
+    local_files_only: true,
+    use_external_data_format: true,
   });
   loadedBackend = classifier.device || "unknown";
   return classifier;

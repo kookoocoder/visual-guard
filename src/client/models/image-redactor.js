@@ -31,6 +31,11 @@ function runtimeUrl(path) {
   return `/${path}`;
 }
 
+ort.env.wasm.wasmPaths = {
+  mjs: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.mjs"),
+  wasm: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.wasm"),
+};
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && node scripts/clean-dist.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "diagnose": "bun scripts/diagnose.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

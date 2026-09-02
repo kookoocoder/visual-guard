@@ -8,6 +8,13 @@ const { env } = await import("@huggingface/transformers");
 const root = resolve(import.meta.dirname, "..");
 env.localModelPath = root.split(sep).join("/") + "/public/models/";
 env.allowRemoteModels = false;
+if (env.backends?.onnx?.wasm) {
+  const wasmBase = `${env.localModelPath}../wasm/v126`;
+  env.backends.onnx.wasm.wasmPaths = {
+    mjs: `${wasmBase}/ort-wasm-simd-threaded.asyncify.mjs`,
+    wasm: `${wasmBase}/ort-wasm-simd-threaded.asyncify.wasm`,
+  };
+}
 
 const text =
   "Hi, I am Alice Smith. Contact me at alice.smith@example.com or +1-555-0100. " +

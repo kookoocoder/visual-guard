@@ -9,7 +9,7 @@ export async function loadHaS() {
     mjs: "/wasm/v129/ort-wasm-simd-threaded.asyncify.mjs",
     wasm: "/wasm/v129/ort-wasm-simd-threaded.asyncify.wasm",
   };
-  session = await ort.InferenceSession.create("/models/has_seg_fp16.onnx", {
+  session = await ort.InferenceSession.create("/models/has/model.onnx", {
     executionProviders: ["webgpu"],
     graphOptimizationLevel: "basic",
   });

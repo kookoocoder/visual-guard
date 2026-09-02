@@ -11,6 +11,13 @@ function runtimeUrl(path) {
   return `/${path}`;
 }
 
+if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.wasmPaths = {
+    mjs: runtimeUrl("wasm/v126/ort-wasm-simd-threaded.asyncify.mjs"),
+    wasm: runtimeUrl("wasm/v126/ort-wasm-simd-threaded.asyncify.wasm"),
+  };
+}
+
 const MODEL_LABELS = {
   email: "EMAIL",
   e_mail: "EMAIL",
