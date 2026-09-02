@@ -3,7 +3,8 @@
   "name": "Privacy Agent",
   "version": "0.1.0",
   "description": "On-device redaction and filtering before anything leaves the browser.",
-  "permissions": ["sidePanel", "debugger", "activeTab", "scripting", "storage", "tabs"],
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

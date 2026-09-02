@@ -114,9 +114,9 @@ async function testModel(kind) {
       await loadNER();
       const g = await msg({ type: "GATHER_TEXT" });
       const text = (g && g.text) || "";
-      const { output, count } = await redactText(text);
+      const { output, count, mode } = await redactText(text);
       const sample = output.slice(0, 400) + (output.length > 400 ? "…" : "");
-      r = { ok: true, count, output: sample, backend: nerBackend(), originalLen: text.length };
+      r = { ok: true, count, output: sample, backend: nerBackend(), mode: mode || "", originalLen: text.length };
     }
     const ok = Boolean(r.ok);
     setDot(modelDots[kind], ok ? "ready" : "error");
@@ -126,7 +126,7 @@ async function testModel(kind) {
         log(`HaS OK: found ${r.found} regions, ${r.width}x${r.height}`);
         if (r.objectUrl) showPreview(r.objectUrl);
       } else {
-        log(`NER OK: ${r.count} sensitive span(s) redacted (input ${r.originalLen} chars)`);
+        log(`NER OK: ${r.count} sensitive span(s) redacted (input ${r.originalLen} chars, ${r.mode})`);
         if (r.output) logJson("redacted sample", r.output);
       }
     }

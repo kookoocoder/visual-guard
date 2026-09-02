@@ -1,3 +1,7 @@
+(() => {
+  if (window.__visualGuardContentScript) return;
+  window.__visualGuardContentScript = true;
+
 const STABLE_REF_MAX = 2000;
 const refMap = new WeakMap();
 let refCounter = 0;
@@ -212,3 +216,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (result !== undefined) sendResponse(result);
 });
+})();

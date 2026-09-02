@@ -1,18 +1,36 @@
 import * as ort from "onnxruntime-web/webgpu";
 
+function runtimeUrl(path) {
+  if (globalThis.chrome?.runtime?.getURL) return chrome.runtime.getURL(path);
+  return `/${path}`;
+}
+
 let session = null;
-let backendChecked = false;
+let unavailable = false;
+let lastError = "";
 
 export async function loadHaS() {
   if (session) return session;
+  if (unavailable) throw new Error(lastError || "The HaS vision model is unavailable.");
+  if (!("gpu" in (globalThis.navigator || {}))) {
+    unavailable = true;
+    lastError = "WebGPU is unavailable in this browser context.";
+    throw new Error(lastError);
+  }
   ort.env.wasm.wasmPaths = {
-    mjs: "/wasm/v129/ort-wasm-simd-threaded.asyncify.mjs",
-    wasm: "/wasm/v129/ort-wasm-simd-threaded.asyncify.wasm",
+    mjs: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.mjs"),
+    wasm: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.wasm"),
   };
-  session = await ort.InferenceSession.create("/models/has_seg_fp16.onnx", {
-    executionProviders: ["webgpu"],
-    graphOptimizationLevel: "basic",
-  });
+  try {
+    session = await ort.InferenceSession.create(runtimeUrl("models/has_seg_fp16.onnx"), {
+      executionProviders: ["webgpu"],
+      graphOptimizationLevel: "basic",
+    });
+  } catch (error) {
+    unavailable = true;
+    lastError = error instanceof Error ? error.message : String(error);
+    throw error;
+  }
   return session;
 }
 
