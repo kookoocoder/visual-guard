@@ -16,7 +16,7 @@ import onnx
 REPO = "https://huggingface.co/xuanwulab/HaS_Image_0209_FP32/resolve/main/"
 CKPT_URL = REPO + "sensitive_seg_best.pt?download=true"
 CKPT = Path("scripts/.cache/sensitive_seg_best.pt")
-ONNX_FP16 = Path("public/models/has_seg_fp16.onnx")
+ONNX_FP16 = Path("public/models/has/model.onnx")
 ONNX_STAGE = Path("scripts/.cache/has_seg_stage.onnx")
 
 

@@ -7,6 +7,9 @@ function runtimeUrl(path) {
   return `/${path}`;
 }
 
+const MODEL_ID = "privacy-filter";
+const MODEL_DTYPE = "q4f16";
+
 env.allowLocalModels = true;
 env.allowRemoteModels = false;
 
@@ -32,26 +35,41 @@ if (inExtension) {
 }
 
 let classifier = null;
+let loadingPromise = null;
 let loadedBackend = null;
 let unavailable = false;
 let lastError = "";
 
-export async function loadNER() {
+export async function loadNER({ onProgress } = {}) {
   if (classifier) return classifier;
-  if (unavailable) throw new Error(lastError || "The local NER model is unavailable.");
+  if (unavailable) throw new Error(lastError || "The NER model is unavailable.");
   if (!("gpu" in (globalThis.navigator || {}))) {
     unavailable = true;
     lastError = "WebGPU is unavailable in this browser context.";
     throw new Error(lastError);
   }
-  classifier = await pipeline("token-classification", "privacy-filter", {
-    device: "webgpu",
-    dtype: "q4f16",
-    local_files_only: true,
-    use_external_data_format: true,
-  });
-  loadedBackend = classifier.device || "unknown";
-  return classifier;
+  if (!loadingPromise) {
+    loadingPromise = pipeline("token-classification", MODEL_ID, {
+      device: "webgpu",
+      dtype: MODEL_DTYPE,
+      local_files_only: true,
+      use_external_data_format: true,
+      progress_callback: typeof onProgress === "function" ? onProgress : undefined,
+    })
+      .then((loaded) => {
+        classifier = loaded;
+        loadedBackend = classifier.device || "unknown";
+        return classifier;
+      })
+      .catch((error) => {
+        loadingPromise = null;
+        unavailable = true;
+        lastError = error instanceof Error ? error.message : String(error);
+        throw error;
+      });
+  }
+
+  return loadingPromise;
 }
 
 export function nerBackend() {
@@ -177,13 +195,13 @@ async function classifyModel(clf, text) {
   return spans;
 }
 
-export async function redactText(text) {
+export async function redactText(text, options = {}) {
   const deterministic = deterministicSpans(text);
   let modelSpans = [];
   let modelFailed = false;
 
   try {
-    const clf = await loadNER();
+    const clf = await loadNER(options);
     modelSpans = await classifyModel(clf, text);
   } catch {
     modelFailed = true;

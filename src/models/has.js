@@ -6,9 +6,15 @@ function runtimeUrl(path) {
 }
 
 let session = null;
+let loadingPromise = null;
 let unavailable = false;
 let lastError = "";
 
+const MODEL_PATHS = [
+  "models/has/model.onnx",
+  // Keep compatibility with packages built from the original export layout.
+  "models/has_seg_fp16.onnx",
+];
 const INPUT_SIZE = 640;
 
 const PRIVACY_CLASSES = [
@@ -35,7 +41,7 @@ const PRIVACY_CLASSES = [
   "paper",
 ];
 
-export async function loadHaS() {
+export async function loadHaS({ onProgress } = {}) {
   if (session) return session;
   if (unavailable) throw new Error(lastError || "The HaS vision model is unavailable.");
   if (!("gpu" in (globalThis.navigator || {}))) {
@@ -47,17 +53,38 @@ export async function loadHaS() {
     mjs: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.mjs"),
     wasm: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.wasm"),
   };
-  try {
-    session = await ort.InferenceSession.create(runtimeUrl("models/has/model.onnx"), {
-      executionProviders: ["webgpu"],
-      graphOptimizationLevel: "basic",
-    });
-  } catch (error) {
-    unavailable = true;
-    lastError = error instanceof Error ? error.message : String(error);
-    throw error;
+
+  if (!loadingPromise) {
+    loadingPromise = (async () => {
+      let lastLoadError = null;
+      for (const modelPath of MODEL_PATHS) {
+        onProgress?.({ status: "initiate", name: "HaS", file: modelPath });
+        try {
+          const loaded = await ort.InferenceSession.create(runtimeUrl(modelPath), {
+            executionProviders: ["webgpu"],
+            graphOptimizationLevel: "basic",
+          });
+          onProgress?.({ status: "done", name: "HaS", file: modelPath });
+          return loaded;
+        } catch (error) {
+          lastLoadError = error;
+        }
+      }
+      throw lastLoadError || new Error("The HaS model could not be loaded.");
+    })()
+      .then((loaded) => {
+        session = loaded;
+        return session;
+      })
+      .catch((error) => {
+        loadingPromise = null;
+        unavailable = true;
+        lastError = error instanceof Error ? error.message : String(error);
+        throw error;
+      });
   }
-  return session;
+
+  return loadingPromise;
 }
 
 export function modelBackend() {

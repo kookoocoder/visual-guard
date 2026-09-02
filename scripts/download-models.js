@@ -11,8 +11,8 @@ const FILES = [
   "config.json",
   "tokenizer.json",
   "tokenizer_config.json",
-  "onnx/model_q4.onnx",
-  "onnx/model_q4.onnx_data",
+  "onnx/model_q4f16.onnx",
+  "onnx/model_q4f16.onnx_data",
 ];
 
 async function download(file, dest) {
