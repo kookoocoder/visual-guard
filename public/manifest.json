@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Privacy Agent",
+  "name": "Visual Guard — Privacy Agent",
   "version": "0.1.0",
-  "description": "On-device redaction and filtering before anything leaves the browser.",
-  "permissions": ["sidePanel", "debugger", "activeTab", "scripting", "storage", "tabs"],
+  "description": "A transparent, client-side privacy layer for browser agents.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
   "host_permissions": ["<all_urls>"],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -23,6 +26,6 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "action": {
-    "default_title": "Open Privacy Agent"
+    "default_title": "Open Visual Guard"
   }
 }

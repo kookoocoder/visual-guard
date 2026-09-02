@@ -1,204 +1,388 @@
-import { loadHaS, runHaS, modelBackend } from "../models/has.js";
-import { loadNER, redactText, nerBackend } from "../models/ner.js";
+import { ImagePrivacyModel } from "../client/models/image-redactor.js";
+import { TextPrivacyModel } from "../client/models/text-redactor.js";
+import { TOOL_DEFINITIONS, getToolDefinition } from "../shared/tool-contract.js";
+import "./sidepanel.css";
 
-const logEl = document.getElementById("log");
-const statusDot = document.getElementById("status-dot");
-const previewImg = document.getElementById("preview-img");
+const $ = (selector) => document.querySelector(selector);
+const hasExtensionRuntime = typeof chrome !== "undefined" && Boolean(chrome.runtime?.sendMessage);
 
-const modelDots = {
-  has: document.getElementById("has-dot"),
-  ner: document.getElementById("ner-dot"),
+const elements = {
+  runtimePill: $("#runtime-pill"),
+  runtimeStatus: $("#runtime-status"),
+  activeTabLabel: $("#active-tab-label"),
+  outputState: $("#output-state"),
+  frameStage: $("#frame-stage"),
+  frameBadge: $("#frame-badge"),
+  frameSummary: $("#frame-summary"),
+  redactedText: $("#redacted-text"),
+  textBadge: $("#text-badge"),
+  textSummary: $("#text-summary"),
+  activityFeed: $("#activity-feed"),
+  activityEmpty: $("#activity-empty"),
+  eventCount: $("#event-count"),
+  navigateUrl: $("#navigate-url"),
+  imageModelStatus: $("#image-model-status"),
+  textModelStatus: $("#text-model-status"),
 };
-const modelDetails = {
-  has: document.getElementById("has-detail"),
-  ner: document.getElementById("ner-detail"),
+
+const sessionState = {
+  activeTab: null,
+  pageState: null,
+  eventCount: 0,
+  busy: false,
 };
 
-function ts() {
-  return new Date().toLocaleTimeString([], { hour12: false });
-}
-
-function log(line, kind = "") {
-  const div = document.createElement("div");
-  div.className = "log-line " + kind;
-  const span = document.createElement("span");
-  span.className = "ts";
-  span.textContent = ts();
-  div.appendChild(span);
-  div.appendChild(document.createTextNode(line));
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
-}
-
-function logJson(label, value) {
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  log(`${label}\n${text}`);
-}
-
-function setDot(el, state) {
-  if (!el) return;
-  el.classList.remove("ready", "busy", "error");
-  if (state === "ready") el.classList.add("ready");
-  else if (state === "loading" || state === "busy") el.classList.add("busy");
-  else if (state === "error") el.classList.add("error");
-}
-
-function setDetail(key, text) {
-  const el = modelDetails[key];
-  if (el) el.textContent = text || "";
-}
-
-function msg(payload) {
-  return chrome.runtime.sendMessage(payload);
-}
-
-function showPreview(objectUrl) {
-  previewImg.src = objectUrl;
-}
-
-function promptArg(label, def) {
-  const value = prompt(label, def);
-  return value == null ? null : value;
-}
-
-async function captureBitmap() {
-  const cap = await msg({ type: "CAPTURE" });
-  if (!cap || !cap.ok) throw new Error((cap && cap.error) || "capture failed");
-  const res = await fetch(cap.dataUrl);
-  const blob = await res.blob();
-  return createImageBitmap(blob);
-}
-
-async function drawRedacted(bitmap, results) {
-  const w = bitmap.width;
-  const h = bitmap.height;
-  const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0, w, h);
-
-  const boxes = results && results.boxes ? results.boxes : null;
-  const scale = results && results.scale ? results.scale : w / 640;
-  const padX = (results && results.padX) || 0;
-  const padY = (results && results.padY) || 0;
-
-  if (boxes && boxes.length) {
-    for (const box of boxes) {
-      const x1 = Math.max(0, (box.x1 - padX) / scale);
-      const y1 = Math.max(0, (box.y1 - padY) / scale);
-      const x2 = Math.min(w, (box.x2 - padX) / scale);
-      const y2 = Math.min(h, (box.y2 - padY) / scale);
-      ctx.fillStyle = "#000";
-      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-    }
+function sendRuntime(message) {
+  if (!hasExtensionRuntime) {
+    return Promise.resolve({ ok: false, error: "Preview mode: the extension runtime is not connected." });
   }
 
-  const blob = await canvas.convertToBlob({ type: "image/png" });
-  const url = URL.createObjectURL(blob);
-  return { width: w, height: h, found: boxes ? boxes.length : 0, objectUrl: url };
-}
-
-async function testModel(kind) {
-  setDot(modelDots[kind], "busy");
-  setDetail(kind, "loading model…");
-  log(`Testing ${kind === "has" ? "HaS" : "NER"}…`);
-  try {
-    let r;
-    if (kind === "has") {
-      await loadHaS();
-      const bitmap = await captureBitmap();
-      const results = await runHaS(bitmap);
-      const out = await drawRedacted(bitmap, results);
-      bitmap.close();
-      r = { ok: true, found: out.found, width: out.width, height: out.height, objectUrl: out.objectUrl, backend: modelBackend() };
-    } else {
-      await loadNER();
-      const g = await msg({ type: "GATHER_TEXT" });
-      const text = (g && g.text) || "";
-      const { output, count } = await redactText(text);
-      const sample = output.slice(0, 400) + (output.length > 400 ? "…" : "");
-      r = { ok: true, count, output: sample, backend: nerBackend(), originalLen: text.length };
-    }
-    const ok = Boolean(r.ok);
-    setDot(modelDots[kind], ok ? "ready" : "error");
-    setDetail(kind, ok ? (r.backend ? `ready via ${r.backend}` : "ready") : (r && r.error) || "failed");
-    if (ok) {
-      if (kind === "has") {
-        log(`HaS OK: found ${r.found} regions, ${r.width}x${r.height}`);
-        if (r.objectUrl) showPreview(r.objectUrl);
-      } else {
-        log(`NER OK: ${r.count} sensitive span(s) redacted (input ${r.originalLen} chars)`);
-        if (r.output) logJson("redacted sample", r.output);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        resolve({ ok: false, error: runtimeError.message });
+        return;
       }
-    }
-  } catch (e) {
-    const err = String(e && e.message ? e.message : e);
-    setDot(modelDots[kind], "error");
-    setDetail(kind, err);
-    log(`Failed: ${err}`, "err");
+      resolve(response ?? { ok: false, error: "No response from the extension." });
+    });
+  });
+}
+
+function setRuntimeStatus(status, label) {
+  elements.runtimePill.classList.remove("running", "fallback");
+  if (status === "running") elements.runtimePill.classList.add("running");
+  if (status === "fallback") elements.runtimePill.classList.add("fallback");
+  elements.runtimeStatus.textContent = label;
+}
+
+function setModelStatus(target, { status, detail = "" }) {
+  const label = status === "ready"
+    ? "READY"
+    : status === "loading"
+      ? "LOADING"
+      : status === "error"
+        ? "FALLBACK"
+        : "NOT LOADED";
+  target.textContent = label;
+  target.classList.remove("loading", "ready", "error");
+  if (status === "loading") target.classList.add("loading");
+  if (status === "ready") target.classList.add("ready");
+  if (status === "error") target.classList.add("error");
+  if (status === "error" && detail) target.title = detail;
+}
+
+function appendEvent(title, detail, kind = "") {
+  elements.activityEmpty?.remove();
+  sessionState.eventCount += 1;
+  elements.eventCount.textContent = `${sessionState.eventCount} event${sessionState.eventCount === 1 ? "" : "s"}`;
+
+  const item = document.createElement("div");
+  item.className = `activity-item ${kind}`.trim();
+  const marker = document.createElement("span");
+  marker.className = "activity-marker";
+  const body = document.createElement("div");
+  body.className = "activity-body";
+  const eventTitle = document.createElement("div");
+  eventTitle.className = "activity-title";
+  eventTitle.textContent = title;
+  const eventDetail = document.createElement("div");
+  eventDetail.className = "activity-detail";
+  eventDetail.textContent = detail;
+  const time = document.createElement("time");
+  time.className = "activity-time";
+  time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  body.append(eventTitle, eventDetail);
+  item.append(marker, body, time);
+  elements.activityFeed.prepend(item);
+
+  while (elements.activityFeed.children.length > 8) {
+    elements.activityFeed.lastElementChild.remove();
   }
 }
 
-async function runTool(name) {
-  log(`Tool: ${name}`);
-  let args = {};
-  if (name === "read_element" || name === "click") {
-    const ref = promptArg("Element ref (from get_page_state):");
-    if (ref == null) return;
-    args.ref = ref;
-  } else if (name === "type") {
-    const ref = promptArg("Element ref (from get_page_state):");
-    if (ref == null) return;
-    const text = promptArg("Text to type:");
-    if (text == null) return;
-    args.ref = ref;
-    args.text = text;
-  } else if (name === "navigate") {
-    const url = promptArg("URL:");
-    if (url == null) return;
-    args.url = url;
-  } else if (name === "scroll") {
-    args.direction = "down";
+function setBusy(isBusy) {
+  sessionState.busy = isBusy;
+  document.querySelectorAll("button").forEach((button) => {
+    button.disabled = isBusy && !button.id.includes("refresh");
+  });
+}
+
+function unwrapContentResult(response) {
+  if (!response?.ok) return { ok: false, error: response?.error || "The action failed." };
+  const nested = response.result;
+  if (nested && typeof nested === "object" && "ok" in nested && "result" in nested) {
+    if (!nested.ok) return { ok: false, error: nested.error || "The page action failed." };
+    return { ok: true, result: nested.result };
+  }
+  return { ok: true, result: nested ?? response.result };
+}
+
+async function refreshActiveTab() {
+  const response = await sendRuntime({ type: "GET_ACTIVE_TAB" });
+  if (response?.ok && response.tab) {
+    sessionState.activeTab = response.tab;
+    elements.activeTabLabel.textContent = response.tab.title || response.tab.url || "Active tab";
+    elements.activeTabLabel.title = response.tab.url || "";
+    return response.tab;
   }
 
-  if (name === "screenshot") {
-    try {
-      await loadHaS();
-      const bitmap = await captureBitmap();
-      const results = await runHaS(bitmap);
-      const out = await drawRedacted(bitmap, results);
-      bitmap.close();
-      log(`screenshot OK: ${out.width}x${out.height}, ${out.found} region(s) masked (${modelBackend()})`);
-      if (out.objectUrl) showPreview(out.objectUrl);
-      else logJson("result", out);
-    } catch (e) {
-      const err = String(e && e.message ? e.message : e);
-      log(`Failed: ${err}`, "err");
-      logJson("screenshot error", err);
+  sessionState.activeTab = null;
+  elements.activeTabLabel.textContent = hasExtensionRuntime ? "No active tab available" : "Preview workspace · no active tab";
+  return null;
+}
+
+function renderFrame({ dataUrl, detections = [], mode, elapsedMs, error = "" }) {
+  elements.frameStage.replaceChildren();
+  const image = document.createElement("img");
+  image.src = dataUrl;
+  image.alt = "Locally redacted viewport preview";
+  elements.frameStage.append(image);
+  elements.frameBadge.textContent = `${detections.length} MASK${detections.length === 1 ? "" : "S"}`;
+  elements.frameBadge.classList.add("active");
+  elements.frameSummary.textContent = `${mode} · ${detections.length} region${detections.length === 1 ? "" : "s"} · ${elapsedMs}ms · raw frame withheld${error ? ` · ${error}` : ""}`;
+  elements.outputState.textContent = "visual output ready";
+}
+
+function renderText({ text, spans = [], mode }) {
+  elements.redactedText.textContent = text || "No readable text was found on this page.";
+  elements.textBadge.textContent = `${spans.length} SPAN${spans.length === 1 ? "" : "S"}`;
+  elements.textBadge.classList.add("active");
+  elements.textSummary.textContent = `${mode} · ${spans.length} sensitive span${spans.length === 1 ? "" : "s"} replaced before tool output`;
+  elements.outputState.textContent = "text output ready";
+}
+
+
+async function redactPageState(pageState) {
+  const textResult = await textModel.redact(pageState.textForLocalModel || "", { preferModel: true, strictFallback: true });
+  const safeElements = await textModel.redactElements(pageState.elements || [], { strictFallback: true });
+  sessionState.pageState = {
+    ...pageState,
+    textForLocalModel: undefined,
+    elements: safeElements,
+    redactedText: textResult.text,
+  };
+  renderText(textResult);
+  return { textResult, safeElements };
+}
+
+async function scanPage() {
+  setRuntimeStatus("running", "SCANNING");
+  try {
+    if (!hasExtensionRuntime) {
+      throw new Error("Load the built extension in Chrome to scan a real tab.");
     }
+    const response = await sendRuntime({ type: "SCAN_PAGE" });
+    const pageResponse = unwrapContentResult(response);
+    if (!pageResponse.ok) throw new Error(pageResponse.error);
+    const pageState = pageResponse.result;
+    if (!pageState) throw new Error("The content script returned no page state.");
+    const { textResult, safeElements } = await redactPageState(pageState);
+    const title = pageState.title || "active page";
+    appendEvent("get_page_state", `${safeElements.length} elements · ${textResult.spans.length} text spans · ${title}${textModel.lastError ? ` · ${textModel.lastError}` : ""}`);
+    setRuntimeStatus(textModel.status === "error" ? "fallback" : "ready", textModel.status === "error" ? "SAFE FALLBACK" : "READY");
+    return pageState;
+  } catch (error) {
+    appendEvent("get_page_state", error instanceof Error ? error.message : String(error), "error");
+    setRuntimeStatus("fallback", "CHECK FAILED");
+    throw error;
+  }
+}
+
+async function captureFrame() {
+  setRuntimeStatus("running", "REDACTING");
+  try {
+    let rawFrame;
+    if (!hasExtensionRuntime) {
+      throw new Error("Load the built extension in Chrome to capture a real viewport.");
+    }
+    const response = await sendRuntime({ type: "CAPTURE_VISIBLE_TAB" });
+    if (!response?.ok || !response.dataUrl) throw new Error(response?.error || "Could not capture the active viewport.");
+    rawFrame = response.dataUrl;
+
+    const redacted = await imageModel.redact(rawFrame);
+    // Do not retain or render rawFrame. The model result is the only frame that reaches the UI.
+    renderFrame(redacted);
+    appendEvent("screenshot", `${redacted.mode} · ${redacted.detections.length} regions · ${redacted.elapsedMs}ms${redacted.error ? ` · ${redacted.error}` : ""}`, redacted.error ? "error" : "");
+    setRuntimeStatus(redacted.error ? "fallback" : "ready", redacted.error ? "SAFE FALLBACK" : "READY");
+    return redacted;
+  } catch (error) {
+    appendEvent("screenshot", error instanceof Error ? error.message : String(error), "error");
+    setRuntimeStatus("fallback", "CHECK FAILED");
+    throw error;
+  }
+}
+
+async function runTextTest() {
+  if (sessionState.busy) return;
+  setBusy(true);
+  setRuntimeStatus("running", "LOADING NER");
+  try {
+    await scanPage();
+  } catch (error) {
+    appendEvent("Privacy Filter", error instanceof Error ? error.message : String(error), "error");
+    setRuntimeStatus("fallback", "CHECK FAILED");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function runVisualTest() {
+  if (sessionState.busy) return;
+  setBusy(true);
+  setRuntimeStatus("running", "LOADING VISION");
+  try {
+    await captureFrame();
+  } catch (error) {
+    appendEvent("HaS visual mask", error instanceof Error ? error.message : String(error), "error");
+    setRuntimeStatus("fallback", "CHECK FAILED");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function ensurePageState() {
+  if (sessionState.pageState) return sessionState.pageState;
+  return scanPage();
+}
+
+function toolRef(preferredRole = "") {
+  const candidates = sessionState.pageState?.elements || [];
+  return (
+    candidates.find((item) => item.role === preferredRole && !item.sensitive)?.ref ||
+    candidates.find((item) => ["button", "link"].includes(item.role) && !item.sensitive)?.ref ||
+    candidates.find((item) => !item.sensitive)?.ref ||
+    candidates[0]?.ref
+  );
+}
+
+async function redactToolResult(value) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return Promise.all(value.map(redactToolResult));
+
+  const safeEntries = await Promise.all(
+    Object.entries(value)
+      .filter(([key]) => !/raw|textForLocalModel/i.test(key))
+      .map(async ([key, item]) => {
+        if (typeof item === "string" && /label|value|text/i.test(key)) {
+          const redacted = await textModel.redact(item, { preferModel: true, strictFallback: true });
+          return [key, redacted.text];
+        }
+        return [key, await redactToolResult(item)];
+      }),
+  );
+  return Object.fromEntries(safeEntries);
+}
+
+async function executeTool(toolName) {
+  if (sessionState.busy) return;
+  const definition = getToolDefinition(toolName);
+  if (!definition) return;
+
+  if (toolName === "get_page_state") {
+    setBusy(true);
+    try { await scanPage(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
     return;
   }
 
-  const r = await msg({ type: "RUN_TOOL", tool: name, args });
-  logJson(name + " result", r);
-  if (!r || !r.ok) logJson(name + " error", r && r.error);
+  if (toolName === "screenshot") {
+    setBusy(true);
+    try { await captureFrame(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const pageState = ["read_element", "click", "type"].includes(toolName) ? await ensurePageState() : null;
+    let tool;
+
+    if (toolName === "read_element") {
+      tool = { name: toolName, selector_ref: toolRef("textbox") || pageState?.elements?.[0]?.ref };
+    } else if (toolName === "click") {
+      tool = { name: toolName, selector_ref: toolRef("button") };
+    } else if (toolName === "type") {
+      tool = { name: toolName, selector_ref: toolRef("textbox"), text: "Local test" };
+    } else if (toolName === "scroll") {
+      tool = { name: toolName, direction: "down", amount_px: 320 };
+    } else if (toolName === "navigate") {
+      const url = elements.navigateUrl.value.trim();
+      if (!url) throw new Error("Add an http(s) URL in the navigate target field first.");
+      tool = { name: toolName, url };
+    }
+
+    if (!tool) throw new Error(`No local test payload is configured for ${toolName}.`);
+    let response;
+    if (hasExtensionRuntime) {
+      response = await sendRuntime({ type: "EXECUTE_TOOL", tool });
+      const result = unwrapContentResult(response);
+      if (!result.ok) throw new Error(result.error);
+      response = result.result;
+    } else {
+      throw new Error("Load the built extension in Chrome to execute tools on a real tab.");
+    }
+
+    const safeResult = await redactToolResult(response);
+    if (toolName === "read_element") {
+      appendEvent(definition.name, `${safeResult?.role || "element"} · ${safeResult?.label || "redacted result"}`);
+      elements.redactedText.textContent = JSON.stringify(safeResult, null, 2);
+      elements.textBadge.textContent = "TOOL RESULT";
+      elements.textBadge.classList.add("active");
+      elements.textSummary.textContent = "read_element returned a client-redacted value.";
+    } else if (toolName === "navigate") {
+      appendEvent(definition.name, `requested ${tool.url}`);
+    } else {
+      appendEvent(definition.name, `${safeResult?.label || safeResult?.ref || safeResult?.direction || "local action complete"}`);
+    }
+    setRuntimeStatus("ready", "READY");
+  } catch (error) {
+    appendEvent(definition.name, error instanceof Error ? error.message : String(error), "error");
+    setRuntimeStatus("fallback", "ACTION BLOCKED");
+  } finally {
+    setBusy(false);
+  }
 }
 
-document.getElementById("test-has").addEventListener("click", () => testModel("has"));
-document.getElementById("test-ner").addEventListener("click", () => testModel("ner"));
+function clearOutputs() {
+  elements.frameStage.innerHTML = "<div class=\"empty-frame\"><span class=\"empty-frame-icon\">◌</span><span>Capture the active tab to see<br />verified masks land on the frame.</span></div>";
+  elements.frameBadge.textContent = "EMPTY";
+  elements.frameBadge.classList.remove("active");
+  elements.frameSummary.textContent = "Your raw frame is never rendered here.";
+  elements.redactedText.textContent = "Scan the active page to inspect the local model output.";
+  elements.textBadge.textContent = "EMPTY";
+  elements.textBadge.classList.remove("active");
+  elements.textSummary.textContent = "Structured sensitive fields are blocked before serialization.";
+  elements.outputState.textContent = "waiting for a test";
+  sessionState.pageState = null;
+  appendEvent("session", "outputs cleared; model sessions stay warm");
+}
 
-document.querySelectorAll("[data-tool]").forEach((btn) => {
-  btn.addEventListener("click", () => runTool(btn.dataset.tool));
+const textModel = new TextPrivacyModel((payload) => {
+  setModelStatus(elements.textModelStatus, payload);
+  if (payload.status === "loading") setRuntimeStatus("running", "LOADING NER");
 });
 
-document.getElementById("run").addEventListener("click", () => {
-  const task = document.getElementById("task").value.trim();
-  if (!task) return;
-  log(`Run requested (server not connected): "${task}"`);
+const imageModel = new ImagePrivacyModel((payload) => {
+  setModelStatus(elements.imageModelStatus, payload);
+  if (payload.status === "loading") setRuntimeStatus("running", "LOADING VISION");
 });
 
-chrome.runtime.onMessage.addListener((m) => {
-  if (!m || !m.type) return;
+$("#test-text").addEventListener("click", runTextTest);
+$("#test-visual").addEventListener("click", runVisualTest);
+$("#scan-page").addEventListener("click", async () => {
+  if (sessionState.busy) return;
+  setBusy(true);
+  try { await scanPage(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+});
+$("#capture-frame").addEventListener("click", async () => {
+  if (sessionState.busy) return;
+  setBusy(true);
+  try { await captureFrame(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+});
+$("#clear-output").addEventListener("click", clearOutputs);
+$("#refresh-tab").addEventListener("click", refreshActiveTab);
+document.querySelectorAll("[data-tool]").forEach((button) => {
+  button.addEventListener("click", () => executeTool(button.dataset.tool));
 });
 
-log("Side panel ready.");
-setDot(statusDot, "ready");
+refreshActiveTab();
+appendEvent("runtime", hasExtensionRuntime ? "client-only mode ready; server agent paused" : "Chrome extension runtime not connected");
