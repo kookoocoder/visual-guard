@@ -89,7 +89,7 @@ The published checkpoint is a `.pt` Ultralytics YOLO11-seg file, 133MB, FP32. No
 Two redaction paths, feeding one rule: **nothing sensitive is serialized, ever, in either the image or the text channel.**
 
 - **Image path.** Captured frame → HaS inference → per-instance masks → each mask region gets blacked out or blurred directly on the canvas → only the redacted canvas is ever turned into a blob and sent.
-- **Text path.** Any text pulled by `get_page_state` or `read_element` first passes through the NER model. Detected spans get replaced with a placeholder token that still tells the agent what kind of thing was there without revealing the value, e.g. `[REDACTED:EMAIL]`, `[REDACTED:PASSWORD]`. Structured DOM fields (password inputs, autocomplete-tagged fields) are redacted by type before they ever reach the NER model, since we already know they're sensitive without needing a model to tell us.
+- **Text path.** Any text pulled by `get_page_state` or `read_element` first passes through the NER model. Detected spans get replaced with a typed placeholder token that still tells the agent what kind of thing was there without revealing the value, e.g. `[EMAIL]`, `[PASSWORD]`. Only an allowlisted set of real keys is emitted or applied to the page; unknown model labels are ignored. Structured DOM fields (password inputs, autocomplete-tagged fields) are redacted by type before they ever reach the NER model, since we already know they're sensitive without needing a model to tell us.
 
 ### 3.7 The tool contract
 
@@ -327,7 +327,7 @@ export async function redactText(text) {
   const spans = await clf(text);
   let out = text;
   for (const span of spans.reverse()) { // reverse so earlier offsets don't shift
-    out = out.slice(0, span.start) + `[REDACTED:${span.entity_group}]` + out.slice(span.end);
+    out = out.slice(0, span.start) + `[${span.entity_group}]` + out.slice(span.end);
   }
   return out;
 }

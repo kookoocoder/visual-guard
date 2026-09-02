@@ -134,6 +134,145 @@
       .map(serializeElement);
   }
 
+  const REAL_REDACTION_KEYS = new Set([
+    "NAME",
+    "EMAIL",
+    "PHONE",
+    "ADDRESS",
+    "DATE",
+    "URL",
+    "CARD",
+    "PASSWORD",
+    "SECRET",
+    "ID",
+  ]);
+
+  let activeTextRedactions = [];
+  let textRedactionObserver = null;
+  let textRedactionScheduled = false;
+
+  function normalizeTextRedactions(redacted) {
+    if (!Array.isArray(redacted)) return [];
+
+    const entries = [];
+    const seen = new Set();
+    for (const item of redacted) {
+      const kind = String(item?.kind ?? "").trim().toUpperCase();
+      if (!REAL_REDACTION_KEYS.has(kind)) continue;
+
+      const placeholder = `[${kind}]`;
+      if (item.placeholder != null && item.placeholder !== placeholder) continue;
+
+      const value = String(item?.value ?? "").trim();
+      if (!value || value === placeholder) continue;
+
+      const key = `${kind}\u0000${value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ value, placeholder });
+    }
+
+    return entries.sort((a, b) => b.value.length - a.value.length);
+  }
+
+  function isWordCharacter(value) {
+    return Boolean(value) && /[\p{L}\p{N}_]/u.test(value);
+  }
+
+  function hasSafeBoundaries(text, start, value) {
+    if (!isWordCharacter(value[0]) || !isWordCharacter(value[value.length - 1])) return true;
+    return !isWordCharacter(text[start - 1]) && !isWordCharacter(text[start + value.length]);
+  }
+
+  function replaceEntry(text, entry) {
+    let cursor = 0;
+    let replaced = 0;
+    let output = "";
+
+    while (cursor < text.length) {
+      const start = text.indexOf(entry.value, cursor);
+      if (start < 0) break;
+
+      if (!hasSafeBoundaries(text, start, entry.value)) {
+        output += text.slice(cursor, start + entry.value.length);
+        cursor = start + entry.value.length;
+        continue;
+      }
+
+      output += text.slice(cursor, start) + entry.placeholder;
+      cursor = start + entry.value.length;
+      replaced += 1;
+    }
+
+    if (!replaced) return { text, count: 0 };
+    return { text: output + text.slice(cursor), count: replaced };
+  }
+
+  function replaceTextNodeValues(entries) {
+    if (!document.body) return 0;
+
+    let replaced = 0;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (!parent || parent.closest("script, style, noscript, template")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    let node;
+    while ((node = walker.nextNode())) {
+      let value = node.nodeValue;
+      for (const entry of entries) {
+        const result = replaceEntry(value, entry);
+        value = result.text;
+        replaced += result.count;
+      }
+      if (value !== node.nodeValue) node.nodeValue = value;
+    }
+    return replaced;
+  }
+
+  function queueActiveTextRedaction() {
+    if (textRedactionScheduled || !activeTextRedactions.length) return;
+    textRedactionScheduled = true;
+    setTimeout(() => {
+      textRedactionScheduled = false;
+      replaceTextNodeValues(activeTextRedactions);
+    }, 0);
+  }
+
+  function observeTextRedactions() {
+    if (textRedactionObserver || !document.body) return;
+    textRedactionObserver = new MutationObserver(queueActiveTextRedaction);
+    textRedactionObserver.observe(document.body, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  function applyTextRedactions(redacted) {
+    const entries = normalizeTextRedactions(redacted);
+    if (!entries.length) {
+      return { ok: true, replaced: 0, keys: [] };
+    }
+
+    const existing = new Map(activeTextRedactions.map((entry) => [entry.placeholder + entry.value, entry]));
+    for (const entry of entries) existing.set(entry.placeholder + entry.value, entry);
+    activeTextRedactions = [...existing.values()].sort((a, b) => b.value.length - a.value.length);
+
+    const replaced = replaceTextNodeValues(activeTextRedactions);
+    observeTextRedactions();
+    return {
+      ok: true,
+      replaced,
+      keys: entries.map((entry) => entry.placeholder).filter((key, index, all) => all.indexOf(key) === index),
+    };
+  }
+
   function pageState() {
     const bodyText = clean(document.body?.innerText || "", 12000);
     return {
@@ -205,6 +344,9 @@
           break;
         case "GET_PAGE_STATE":
           sendResponse({ ok: true, result: pageState() });
+          break;
+        case "APPLY_TEXT_REDACTION":
+          sendResponse(applyTextRedactions(message.redacted));
           break;
         case "READ_ELEMENT":
           sendResponse({ ok: true, result: readElement(message.selectorRef) });

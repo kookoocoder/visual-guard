@@ -178,8 +178,17 @@ async function scanPage() {
     const pageState = pageResponse.result;
     if (!pageState) throw new Error("The content script returned no page state.");
     const { textResult, safeElements } = await redactPageState(pageState);
+    const pageRedaction = await sendRuntime({
+      type: "APPLY_TEXT_REDACTION",
+      redacted: textResult.spans || [],
+    });
     const title = pageState.title || "active page";
-    appendEvent("get_page_state", `${safeElements.length} elements · ${textResult.spans.length} text spans · ${title}${textModel.lastError ? ` · ${textModel.lastError}` : ""}`);
+    const pageStatus = pageRedaction?.ok
+      ? ` · page text replaced ${pageRedaction.replaced ?? 0} time(s)`
+      : pageRedaction?.error
+        ? ` · page text was not updated (${pageRedaction.error})`
+        : "";
+    appendEvent("get_page_state", `${safeElements.length} elements · ${textResult.spans.length} text spans · ${title}${pageStatus}${textModel.lastError ? ` · ${textModel.lastError}` : ""}`);
     setRuntimeStatus(textModel.status === "error" ? "fallback" : "ready", textModel.status === "error" ? "SAFE FALLBACK" : "READY");
     return pageState;
   } catch (error) {

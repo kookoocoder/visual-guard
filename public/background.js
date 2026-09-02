@@ -130,6 +130,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
 
+      if (message.type === "APPLY_TEXT_REDACTION") {
+        sendResponse(
+          await sendToContent(tab.id, {
+            type: "APPLY_TEXT_REDACTION",
+            redacted: Array.isArray(message.redacted) ? message.redacted : [],
+          }),
+        );
+        return;
+      }
+
       if (message.type === "EXECUTE_TOOL") {
         sendResponse({ ok: true, result: await executeTool(message.tool, tab) });
         return;

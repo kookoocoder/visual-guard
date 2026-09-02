@@ -26,13 +26,34 @@ const MODEL_LABELS = {
   person: "NAME",
   name: "NAME",
   address: "ADDRESS",
+  account: "ID",
+  ssn: "ID",
+  date: "DATE",
+  url: "URL",
   credit_card: "CARD",
   card: "CARD",
   password: "PASSWORD",
   secret: "SECRET",
   api_key: "SECRET",
-  ssn: "ID",
 };
+
+const REAL_REDACTION_KEYS = new Set([
+  "NAME",
+  "EMAIL",
+  "PHONE",
+  "ADDRESS",
+  "DATE",
+  "URL",
+  "CARD",
+  "PASSWORD",
+  "SECRET",
+  "ID",
+]);
+
+export function redactionPlaceholder(kind) {
+  const normalized = String(kind ?? "").trim().toUpperCase();
+  return REAL_REDACTION_KEYS.has(normalized) ? `[${normalized}]` : null;
+}
 
 const deterministicPatterns = [
   { kind: "EMAIL", regex: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
@@ -71,7 +92,9 @@ function applySpans(text, spans) {
   return [...spans]
     .sort((a, b) => b.start - a.start)
     .reduce((result, span) => {
-      return `${result.slice(0, span.start)}[REDACTED:${span.kind}]${result.slice(span.end)}`;
+      const placeholder = redactionPlaceholder(span.kind);
+      if (!placeholder) return result;
+      return `${result.slice(0, span.start)}${placeholder}${result.slice(span.end)}`;
     }, text);
 }
 
@@ -193,10 +216,14 @@ export class TextPrivacyModel {
       const modelOutput = modelOutputs?.[index];
       const spans = [...spansByText[index]];
       if (Array.isArray(modelOutput)) spans.push(...normalizeModelOutput(modelOutput, source));
-      const merged = mergeSpans(spans);
+      const merged = mergeSpans(spans.filter((span) => redactionPlaceholder(span.kind)));
       return {
         text: applySpans(source, merged),
-        spans: merged,
+        spans: merged.map((span) => ({
+          ...span,
+          value: source.slice(span.start, span.end),
+          placeholder: redactionPlaceholder(span.kind),
+        })),
         mode: modelOutputs ? "webgpu + deterministic" : modelFailed ? "safe fallback · deterministic" : "deterministic",
       };
     });
