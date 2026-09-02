@@ -126,16 +126,29 @@ export async function runHaS(imageBitmap) {
   }
   const protos = results.output1;
   const masks = createMasks(boxes, protos);
-  return { boxes, masks, protos, scale, padX, padY, nw, nh, width: imageBitmap.width, height: imageBitmap.height };
+
+  // Drop near-full-frame detections: these are broad "wall" style false
+  // positives that would black out the whole page for no useful privacy gain.
+  const contentW = nw;
+  const contentH = nh;
+  const usable = masks.filter((det) => {
+    const w = Math.max(det.x1, det.x2) - Math.min(det.x1, det.x2);
+    const h = Math.max(det.y1, det.y2) - Math.min(det.y1, det.y2);
+    return (w * h) / (contentW * contentH) < 0.7;
+  });
+
+  return { boxes, masks: usable, protos, scale, padX, padY, nw, nh, width: imageBitmap.width, height: imageBitmap.height };
 }
 
 // Decode YOLO11-seg instance masks: sigmoid(coef · protos) per detection,
-// producing a 160x160 binary mask aligned to the letterboxed 640x640 input.
+// cropped to the detection's bounding box (in 160x160 mask space) so each
+// mask redacts only the actual object region, never the whole plane.
 export function createMasks(boxes, protos) {
   if (!protos || boxes.length === 0) return [];
   const proto = protos.data;
   const [, channels, mh, mw] = protos.dims.map(Number);
   const plane = mh * mw;
+  const maskScale = 160 / INPUT_SIZE; // 160-mask px per 640-input px
 
   return boxes.map((box) => {
     const alpha = new Uint8ClampedArray(plane);
@@ -146,35 +159,65 @@ export function createMasks(boxes, protos) {
       }
       alpha[p] = sigmoid(value) > 0.5 ? 255 : 0;
     }
-    return { ...box, maskAlpha: alpha, mw, mh, plane };
+
+    // Detection box in 160-mask space, clamped to the plane.
+    const mx1 = Math.max(0, Math.floor(Math.min(box.x1, box.x2) * maskScale));
+    const my1 = Math.max(0, Math.floor(Math.min(box.y1, box.y2) * maskScale));
+    const mx2 = Math.min(mw, Math.ceil(Math.max(box.x1, box.x2) * maskScale));
+    const my2 = Math.min(mh, Math.ceil(Math.max(box.y1, box.y2) * maskScale));
+    const cw = Math.max(1, mx2 - mx1);
+    const ch = Math.max(1, my2 - my1);
+
+    const rgba = new Uint8ClampedArray(ch * cw * 4);
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        const a = alpha[(my1 + y) * mw + (mx1 + x)];
+        const o = (y * cw + x) * 4;
+        rgba[o] = 0;
+        rgba[o + 1] = 0;
+        rgba[o + 2] = 0;
+        rgba[o + 3] = a;
+      }
+    }
+
+    return {
+      ...box,
+      maskRgba: rgba,
+      maskX: mx1,
+      maskY: my1,
+      maskW: cw,
+      maskH: ch,
+    };
   });
 }
 
 // Draw redacted frame onto `ctx` (already-sized to srcW x srcH): black out
-// only the actual segmented pixels of each instance mask, mapped from the
-// letterboxed 640x640 input back to the original frame dimensions.
+// only the actual segmented pixels of each instance mask, cropped to that
+// detection's bounding box and mapped back from the letterboxed 640x640
+// input to the original frame dimensions.
 export function drawRedacted(ctx, srcW, srcH, masks, transform) {
-  const { padX, padY, nw, nh } = transform;
+  const { padX, padY, scale } = transform;
   if (!masks || masks.length === 0) return masks.length;
 
   const maskScaler = INPUT_SIZE / 160; // 640 / 160 = 4
   for (const det of masks) {
-    const maskCanvas = new OffscreenCanvas(det.mw, det.mh);
+    const maskCanvas = new OffscreenCanvas(det.maskW, det.maskH);
     const mctx = maskCanvas.getContext("2d");
-    const imageData = new ImageData(det.maskAlpha, det.mw, det.mh);
-    mctx.putImageData(imageData, 0, 0);
+    mctx.putImageData(new ImageData(det.maskRgba, det.maskW, det.maskH), 0, 0);
 
-    // Region of the mask that actually covers the source image within the
-    // letterboxed 640x640 input -> mapped to the full source canvas.
-    const sx = padX / maskScaler;
-    const sy = padY / maskScaler;
-    const sw = nw / maskScaler;
-    const sh = nh / maskScaler;
-    ctx.drawImage(maskCanvas, sx, sy, sw, sh, 0, 0, srcW, srcH);
-    ctx.globalCompositeOperation = "destination-in";
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, srcW, srcH);
-    ctx.globalCompositeOperation = "source-over";
+    // Detection box in 640-input space.
+    const bx1 = Math.min(det.x1, det.x2);
+    const by1 = Math.min(det.y1, det.y2);
+    const bx2 = Math.max(det.x1, det.x2);
+    const by2 = Math.max(det.y1, det.y2);
+
+    // Map the 640-input box to source frame coordinates.
+    const fx = (bx1 - padX) / scale;
+    const fy = (by1 - padY) / scale;
+    const fw = (bx2 - bx1) / scale;
+    const fh = (by2 - by1) / scale;
+
+    ctx.drawImage(maskCanvas, 0, 0, det.maskW, det.maskH, fx, fy, fw, fh);
   }
   return masks.length;
 }
