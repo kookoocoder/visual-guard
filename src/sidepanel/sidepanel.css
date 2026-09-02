@@ -40,4 +40,5 @@ summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 .log-line { padding: 2px 0; border-bottom: 1px dashed var(--border); white-space: pre-wrap; word-break: break-word; }
 .log-line .ts { color: var(--muted); margin-right: 6px; }
 .log-line.err { color: #d93025; }
+.log-line.ner { color: #f9d71c; }
 #preview img { width: 100%; border-top: 1px solid var(--border); display: block; }

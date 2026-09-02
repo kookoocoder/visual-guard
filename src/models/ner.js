@@ -174,9 +174,15 @@ export async function redactText(text) {
   }
 
   const merged = mergeSpans([...deterministic, ...modelSpans]);
+  const redacted = merged.map((span) => ({
+    kind: span.kind,
+    value: text.slice(span.start, span.end),
+    score: span.score,
+  }));
   return {
     output: applySpans(text, merged),
     count: merged.length,
     mode: modelFailed ? "deterministic" : "webgpu + deterministic",
+    redacted,
   };
 }

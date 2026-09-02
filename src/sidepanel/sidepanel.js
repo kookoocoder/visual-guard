@@ -1,6 +1,5 @@
-import { loadHaS, runHaS, modelBackend } from "../models/has.js";
+import { loadHaS, runHaS, modelBackend, drawRedacted as drawHaSMasks } from "../models/has.js";
 import { loadNER, redactText, nerBackend } from "../models/ner.js";
-
 const logEl = document.getElementById("log");
 const statusDot = document.getElementById("status-dot");
 const previewImg = document.getElementById("preview-img");
@@ -76,25 +75,24 @@ async function drawRedacted(bitmap, results) {
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, 0, 0, w, h);
 
-  const boxes = results && results.boxes ? results.boxes : null;
-  const scale = results && results.scale ? results.scale : w / 640;
-  const padX = (results && results.padX) || 0;
-  const padY = (results && results.padY) || 0;
-
-  if (boxes && boxes.length) {
-    for (const box of boxes) {
-      const x1 = Math.max(0, (box.x1 - padX) / scale);
-      const y1 = Math.max(0, (box.y1 - padY) / scale);
-      const x2 = Math.min(w, (box.x2 - padX) / scale);
-      const y2 = Math.min(h, (box.y2 - padY) / scale);
-      ctx.fillStyle = "#000";
-      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+  const masks = (results && results.masks) || null;
+  let found = 0;
+  if (masks && masks.length) {
+    found = drawHaSMasks(ctx, w, h, masks, results);
+    ctx.strokeStyle = "#7CFC00";
+    ctx.lineWidth = Math.max(2, Math.round(w / 400));
+    for (const box of masks) {
+      const x = (box.x1 - results.padX) / results.scale;
+      const y = (box.y1 - results.padY) / results.scale;
+      const x2 = (box.x2 - results.padX) / results.scale;
+      const y2 = (box.y2 - results.padY) / results.scale;
+      ctx.strokeRect(x, y, x2 - x, y2 - y);
     }
   }
 
   const blob = await canvas.convertToBlob({ type: "image/png" });
   const url = URL.createObjectURL(blob);
-  return { width: w, height: h, found: boxes ? boxes.length : 0, objectUrl: url };
+  return { width: w, height: h, found, objectUrl: url };
 }
 
 async function testModel(kind) {
@@ -114,9 +112,9 @@ async function testModel(kind) {
       await loadNER();
       const g = await msg({ type: "GATHER_TEXT" });
       const text = (g && g.text) || "";
-      const { output, count, mode } = await redactText(text);
+      const { output, count, mode, redacted } = await redactText(text);
       const sample = output.slice(0, 400) + (output.length > 400 ? "…" : "");
-      r = { ok: true, count, output: sample, backend: nerBackend(), mode: mode || "", originalLen: text.length };
+      r = { ok: true, count, output: sample, backend: nerBackend(), mode: mode || "", originalLen: text.length, redacted };
     }
     const ok = Boolean(r.ok);
     setDot(modelDots[kind], ok ? "ready" : "error");
@@ -127,6 +125,11 @@ async function testModel(kind) {
         if (r.objectUrl) showPreview(r.objectUrl);
       } else {
         log(`NER OK: ${r.count} sensitive span(s) redacted (input ${r.originalLen} chars, ${r.mode})`);
+        if (r.redacted && r.redacted.length) {
+          for (const span of r.redacted) {
+            log(`  · [${span.kind}] "${span.value}" (score ${(span.score ?? 0).toFixed(2)})`, "ner");
+          }
+        }
         if (r.output) logJson("redacted sample", r.output);
       }
     }
