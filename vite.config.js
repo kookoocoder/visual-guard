@@ -7,6 +7,8 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root: resolve(projectRoot, "src"),
   publicDir: resolve(projectRoot, "public"),
+  envDir: projectRoot,
+  base: "./",
   build: {
     outDir: resolve(projectRoot, "dist"),
     emptyOutDir: true,

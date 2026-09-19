@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "User-Agent",
+          "operation": "set",
+          "value": "QwenCode/0.2.0 (linux x64)"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||agentrouter.org/",
+      "resourceTypes": ["xmlhttprequest", "other"]
+    }
+  }
+]

@@ -130,7 +130,7 @@
 
     return Array.from(document.querySelectorAll(selector))
       .filter(isVisible)
-      .slice(0, 80)
+      .slice(0, 60)
       .map(serializeElement);
   }
 
@@ -274,7 +274,7 @@
   }
 
   function pageState() {
-    const bodyText = clean(document.body?.innerText || "", 12000);
+    const bodyText = clean(document.body?.innerText || "", 6000);
     return {
       url: location.href,
       title: document.title || "Untitled page",

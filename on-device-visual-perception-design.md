@@ -19,7 +19,7 @@ The server runs an agent loop against a vision-language model. It sees redacted 
 |---|---|---|
 | `xuanwulab/HaS_Image_0209_FP32` (YOLO11-seg, 21 privacy categories) | Pixel-level masks over faces, ID cards, screens, financial cards, biometrics in the captured frame | Client, ONNX Runtime Web, WebGPU |
 | `openai/privacy-filter` (token classification) | Tags PII spans in page text: names, emails, phones, addresses, account numbers, secrets | Client, transformers.js, WebGPU |
-| `deepseek-v4-flash-vision-exp` | The actual browser-use agent. Takes redacted screenshot + task text, decides the next action or tool call | Server |
+| `deepseek-v4-flash` (fallback: `glm-5.3`) via AgentRouter `https://agentrouter.org/v1` | The browser-use chat agent. Takes redacted page state / tool results, decides the next action or tool call | Client-side agent loop (side panel) calling OpenAI-compatible Chat Completions |
 
 None of the three do each other's job. The YOLO model finds sensitive pixels, not buttons. The NER model finds sensitive words, not layout. The VLM does not see anything raw, it only sees what's already been through the first two.
 
@@ -361,22 +361,21 @@ Each test button calls the exact same function the background service worker wil
 
 Suggested order for today: get the two model test buttons green first (they're the parts that involve new dependencies and are most likely to break), then work down the tool list top to bottom, since `get_page_state` produces the ref ids the rest of the tools need as input.
 
-## 4. Server architecture
+## 4. Agent loop (OpenAI-compatible)
 
-The server is a thin agent loop, not a custom pipeline. It does normal tool-calling against `deepseek-v4-flash-vision-exp` (OpenAI-compatible Chat Completions or Anthropic-compatible `/messages`, either works, DeepSeek supports both).
+The agent loop is thin tool-calling against AgentRouter's OpenAI-compatible endpoint (`https://agentrouter.org/v1`), default model `deepseek-v4-flash`, fallback `glm-5.3`. Both support function tools. The loop runs in the side panel so local NER / HaS redaction stays on the same path as manual tests; only already-redacted tool results leave the device.
 
 Loop:
 
 1. User gives a task in the side panel ("fill out this form", "find the checkout button and click it").
-2. Server sends the task plus the current redacted screenshot to the model, with the tool schema above attached.
+2. Client sends the task to the chat model with the tool schema attached.
 3. Model replies with either a final answer or a tool call.
-4. Server relays the tool call to the extension's background service worker over the open connection.
-5. Extension executes it (DOM walk or CDP, depending on the tool), redacts anything sensitive in the result, sends the result back.
-6. Server appends the tool result to the conversation and calls the model again. Repeat until the model returns a final answer or a max-turn limit is hit.
+4. Side panel executes the tool (DOM walk / capture), redacts anything sensitive, appends the tool result.
+5. Client calls the model again. Repeat until a final answer or max-turn limit.
 
-DeepSeek's vision input caps each image at 384 tokens, so we do not send a screenshot on every single turn if the model just asked for `read_element` on plain text, we only attach a fresh screenshot when the model actually asked for one via the `screenshot` tool or at loop start. This keeps token cost and latency down and lines up with the earlier decision to only send DOM/image data on demand rather than every turn by default.
+Screenshots are redacted on-device before anything is summarized for the model. DOM text always passes through the privacy filter first. AgentRouter's WAF requires a specific `User-Agent`; the extension sets it via `declarativeNetRequest` for `agentrouter.org`.
 
-Known gap worth stating plainly: `deepseek-v4-flash-vision-exp` is cloud-hosted only right now, no open-weight release. The problem statement allows cloud-hosted models during the hackathon itself, so this is fine for the demo, but if the eval specifically rewards fully offline-deployable server stacks, we note this as a documented tradeoff rather than pretend otherwise. A same-shaped fallback (self-hosted Qwen2-VL with tool calling) is a drop-in swap later since the tool contract doesn't change.
+Known gap: these chat models are cloud-hosted. The problem statement allows that for the hackathon; a same-shaped self-hosted swap later does not change the tool contract.
 
 ## 5. Data flow, end to end
 
@@ -386,7 +385,7 @@ Known gap worth stating plainly: `deepseek-v4-flash-vision-exp` is cloud-hosted 
                                           |
                                    background service worker
                                           |
-                                 server agent loop (DeepSeek V4 Flash Vision)
+                                 agent loop (AgentRouter · deepseek-v4-flash / glm-5.3)
                                           |
                                     tool call decision
                                           |

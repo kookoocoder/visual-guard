@@ -117,6 +117,72 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
 
+      if (message.type === "AGENT_CHAT") {
+        const { body, apiKey, baseUrl } = message;
+        if (!apiKey) throw new Error("Missing AgentRouter API key.");
+        const endpoint = `${String(baseUrl || "http://127.0.0.1:8787/v1").replace(/\/$/, "")}/chat/completions`;
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "User-Agent": "QwenCode/0.2.0 (linux x64)",
+          },
+          body: JSON.stringify(body ?? {}),
+        });
+        const text = await response.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          sendResponse({
+            ok: false,
+            status: response.status,
+            error:
+              `Upstream returned non-JSON (${response.status}). ` +
+              `If this is agentrouter.org HTML/405, Chrome is WAF-blocked — use bun run agent-proxy and base URL http://127.0.0.1:8787/v1. ` +
+              text.slice(0, 120),
+          });
+          return;
+        }
+        if (!response.ok) {
+          sendResponse({
+            ok: false,
+            status: response.status,
+            error: data?.error?.message || data?.message || `HTTP ${response.status}`,
+            data,
+          });
+          return;
+        }
+        sendResponse({ ok: true, data });
+        return;
+      }
+
+      if (message.type === "PROXY_HEALTH") {
+        const url = message.url || "http://127.0.0.1:8787/health";
+        try {
+          const response = await fetch(url, { method: "GET" });
+          const text = await response.text();
+          let data = null;
+          try {
+            data = text ? JSON.parse(text) : null;
+          } catch {
+            data = { raw: text.slice(0, 200) };
+          }
+          if (!response.ok) {
+            sendResponse({ ok: false, status: response.status, error: data?.error?.message || `HTTP ${response.status}`, data });
+            return;
+          }
+          sendResponse({ ok: true, data });
+        } catch (error) {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+
       const tab = await getActiveTab();
       if (!tab?.id) throw new Error("No active tab is available.");
 

@@ -9,9 +9,24 @@
     "activeTab",
     "scripting",
     "storage",
-    "tabs"
+    "tabs",
+    "declarativeNetRequestWithHostAccess"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "<all_urls>",
+    "https://agentrouter.org/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "agentrouter_headers",
+        "enabled": true,
+        "path": "rules/agentrouter.json"
+      }
+    ]
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },

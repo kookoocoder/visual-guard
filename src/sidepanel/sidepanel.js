@@ -1,110 +1,72 @@
 import { ImagePrivacyModel } from "../client/models/image-redactor.js";
 import { TextPrivacyModel } from "../client/models/text-redactor.js";
-import { TOOL_DEFINITIONS, getToolDefinition } from "../shared/tool-contract.js";
+import { getToolDefinition } from "../shared/tool-contract.js";
+import { runAgentLoop } from "../agent/agent-loop.js";
+import { loadAgentSettings, saveAgentSettings } from "../agent/settings.js";
+import { AGENT_CONFIG } from "../agent/config.js";
 import "./sidepanel.css";
 
 const $ = (selector) => document.querySelector(selector);
 const hasExtensionRuntime = typeof chrome !== "undefined" && Boolean(chrome.runtime?.sendMessage);
 
-const elements = {
-  runtimePill: $("#runtime-pill"),
-  runtimeStatus: $("#runtime-status"),
-  activeTabLabel: $("#active-tab-label"),
-  outputState: $("#output-state"),
-  frameStage: $("#frame-stage"),
-  frameBadge: $("#frame-badge"),
-  frameSummary: $("#frame-summary"),
-  redactedText: $("#redacted-text"),
-  textBadge: $("#text-badge"),
-  textSummary: $("#text-summary"),
-  activityFeed: $("#activity-feed"),
-  activityEmpty: $("#activity-empty"),
-  eventCount: $("#event-count"),
+const els = {
+  statusDot: $("#status-dot"),
+  statusLabel: $("#status-label"),
+  task: $("#task"),
+  run: $("#run"),
+  model: $("#model"),
+  apiKey: $("#api-key"),
+  baseUrl: $("#base-url"),
+  hasDot: $("#has-dot"),
+  nerDot: $("#ner-dot"),
   navigateUrl: $("#navigate-url"),
-  imageModelStatus: $("#image-model-status"),
-  textModelStatus: $("#text-model-status"),
+  log: $("#log"),
+  previewImg: $("#preview-img"),
+  copyLog: $("#copy-log"),
+  clearLog: $("#clear-log"),
 };
 
-const sessionState = {
-  activeTab: null,
+const state = {
   pageState: null,
-  eventCount: 0,
   busy: false,
+  logLines: [],
+  _nerLoadLogged: false,
+  _hasLoadLogged: false,
 };
 
 function sendRuntime(message) {
   if (!hasExtensionRuntime) {
-    return Promise.resolve({ ok: false, error: "Preview mode: the extension runtime is not connected." });
+    return Promise.resolve({ ok: false, error: "Extension runtime not connected. Load dist/ in Chrome." });
   }
-
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        resolve({ ok: false, error: runtimeError.message });
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
         return;
       }
-      resolve(response ?? { ok: false, error: "No response from the extension." });
+      resolve(response ?? { ok: false, error: "No response from extension." });
     });
   });
 }
 
-function setRuntimeStatus(status, label) {
-  elements.runtimePill.classList.remove("running", "fallback");
-  if (status === "running") elements.runtimePill.classList.add("running");
-  if (status === "fallback") elements.runtimePill.classList.add("fallback");
-  elements.runtimeStatus.textContent = label;
+function setStatus(kind, label) {
+  els.statusDot.classList.remove("ready", "busy", "error");
+  if (kind) els.statusDot.classList.add(kind);
+  els.statusLabel.textContent = label;
 }
 
-function setModelStatus(target, { status, detail = "" }) {
-  const label = status === "ready"
-    ? "READY"
-    : status === "loading"
-      ? "LOADING"
-      : status === "error"
-        ? "FALLBACK"
-        : "NOT LOADED";
-  target.textContent = label;
-  target.classList.remove("loading", "ready", "error");
-  if (status === "loading") target.classList.add("loading");
-  if (status === "ready") target.classList.add("ready");
-  if (status === "error") target.classList.add("error");
-  if (status === "error" && detail) target.title = detail;
+function setModelDot(dot, status) {
+  dot.classList.remove("ready", "busy", "error");
+  if (status === "ready") dot.classList.add("ready");
+  else if (status === "loading") dot.classList.add("busy");
+  else if (status === "error") dot.classList.add("error");
 }
 
-function appendEvent(title, detail, kind = "") {
-  elements.activityEmpty?.remove();
-  sessionState.eventCount += 1;
-  elements.eventCount.textContent = `${sessionState.eventCount} event${sessionState.eventCount === 1 ? "" : "s"}`;
-
-  const item = document.createElement("div");
-  item.className = `activity-item ${kind}`.trim();
-  const marker = document.createElement("span");
-  marker.className = "activity-marker";
-  const body = document.createElement("div");
-  body.className = "activity-body";
-  const eventTitle = document.createElement("div");
-  eventTitle.className = "activity-title";
-  eventTitle.textContent = title;
-  const eventDetail = document.createElement("div");
-  eventDetail.className = "activity-detail";
-  eventDetail.textContent = detail;
-  const time = document.createElement("time");
-  time.className = "activity-time";
-  time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  body.append(eventTitle, eventDetail);
-  item.append(marker, body, time);
-  elements.activityFeed.prepend(item);
-
-  while (elements.activityFeed.children.length > 8) {
-    elements.activityFeed.lastElementChild.remove();
-  }
-}
-
-function setBusy(isBusy) {
-  sessionState.busy = isBusy;
+function setBusy(busy) {
+  state.busy = busy;
   document.querySelectorAll("button").forEach((button) => {
-    button.disabled = isBusy && !button.id.includes("refresh");
+    if (button.id === "copy-log" || button.id === "clear-log") return;
+    button.disabled = busy;
   });
 }
 
@@ -118,145 +80,240 @@ function unwrapContentResult(response) {
   return { ok: true, result: nested ?? response.result };
 }
 
-async function refreshActiveTab() {
-  const response = await sendRuntime({ type: "GET_ACTIVE_TAB" });
-  if (response?.ok && response.tab) {
-    sessionState.activeTab = response.tab;
-    elements.activeTabLabel.textContent = response.tab.title || response.tab.url || "Active tab";
-    elements.activeTabLabel.title = response.tab.url || "";
-    return response.tab;
+/** Structured log used for testing the agent loop end-to-end. */
+function log(tag, message, { level = "info", detail = null } = {}) {
+  const entry = {
+    t: new Date().toISOString(),
+    tag,
+    message: String(message ?? ""),
+    level,
+    detail,
+  };
+  state.logLines.push(entry);
+
+  const consoleFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+  consoleFn(`[${tag}] ${entry.message}`, detail ?? "");
+
+  const empty = els.log.querySelector(".log-empty");
+  empty?.remove();
+
+  const line = document.createElement("div");
+  line.className = `log-line level-${level}`;
+
+  const meta = document.createElement("div");
+  meta.className = "log-meta";
+  const time = document.createElement("span");
+  time.className = "log-time";
+  time.textContent = new Date(entry.t).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const tagEl = document.createElement("span");
+  tagEl.className = "log-tag";
+  tagEl.textContent = tag;
+  meta.append(time, tagEl);
+
+  const msg = document.createElement("div");
+  msg.className = "log-msg";
+  msg.textContent = entry.message;
+  line.append(meta, msg);
+
+  if (detail != null && detail !== "") {
+    const pre = document.createElement("pre");
+    pre.className = "log-detail";
+    const rendered = typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+    pre.textContent = rendered.length > 1200 ? `${rendered.slice(0, 1200)}…` : rendered;
+    line.append(pre);
   }
 
-  sessionState.activeTab = null;
-  elements.activeTabLabel.textContent = hasExtensionRuntime ? "No active tab available" : "Preview workspace · no active tab";
-  return null;
+  els.log.append(line);
+  // Cap DOM log rows — huge logs were killing performance.
+  while (els.log.children.length > 80) els.log.firstElementChild.remove();
+  els.log.scrollTop = els.log.scrollHeight;
 }
 
-function renderFrame({ dataUrl, detections = [], mode, elapsedMs, error = "" }) {
-  elements.frameStage.replaceChildren();
-  const image = document.createElement("img");
-  image.src = dataUrl;
-  image.alt = "Locally redacted viewport preview";
-  elements.frameStage.append(image);
-  elements.frameBadge.textContent = `${detections.length} MASK${detections.length === 1 ? "" : "S"}`;
-  elements.frameBadge.classList.add("active");
-  elements.frameSummary.textContent = `${mode} · ${detections.length} region${detections.length === 1 ? "" : "s"} · ${elapsedMs}ms · raw frame withheld${error ? ` · ${error}` : ""}`;
-  elements.outputState.textContent = "visual output ready";
+function clearLog() {
+  state.logLines = [];
+  els.log.replaceChildren();
+  const empty = document.createElement("div");
+  empty.className = "log-empty";
+  empty.textContent = "Log cleared. Run a task or tool test to see events.";
+  els.log.append(empty);
 }
 
-function renderText({ text, spans = [], mode }) {
-  elements.redactedText.textContent = text || "No readable text was found on this page.";
-  elements.textBadge.textContent = `${spans.length} SPAN${spans.length === 1 ? "" : "S"}`;
-  elements.textBadge.classList.add("active");
-  elements.textSummary.textContent = `${mode} · ${spans.length} sensitive span${spans.length === 1 ? "" : "s"} replaced before tool output`;
-  elements.outputState.textContent = "text output ready";
+async function copyLog() {
+  const text = state.logLines
+    .map((line) => {
+      const detail =
+        line.detail == null
+          ? ""
+          : `\n${typeof line.detail === "string" ? line.detail : JSON.stringify(line.detail, null, 2)}`;
+      return `[${line.t}] ${line.level.toUpperCase()} ${line.tag} ${line.message}${detail}`;
+    })
+    .join("\n\n");
+  try {
+    await navigator.clipboard.writeText(text || "(empty log)");
+    log("log", "Copied to clipboard");
+  } catch (error) {
+    log("log", error instanceof Error ? error.message : String(error), { level: "error" });
+  }
 }
 
+function showPreview(dataUrl) {
+  if (!dataUrl) {
+    els.previewImg.hidden = true;
+    els.previewImg.removeAttribute("src");
+    return;
+  }
+  els.previewImg.src = dataUrl;
+  els.previewImg.hidden = false;
+}
 
-async function redactPageState(pageState) {
-  const textResult = await textModel.redact(pageState.textForLocalModel || "", { preferModel: true, strictFallback: true });
-  const safeElements = await textModel.redactElements(pageState.elements || [], { strictFallback: true });
-  sessionState.pageState = {
+function usefulElements(elements = [], limit = 40) {
+  const skippedRoles = new Set(["none", "presentation", "img"]);
+  const ranked = [];
+  for (const el of elements) {
+    const label = String(el.label || "").trim();
+    if (!label || label === "Unlabeled element") continue;
+    if (skippedRoles.has(el.role) && el.tag === "svg") continue;
+    ranked.push(el);
+  }
+  const preferred = ranked.filter((el) =>
+    ["button", "link", "textbox", "heading", "treeitem", "tab", "checkbox", "menuitem"].includes(el.role),
+  );
+  const rest = ranked.filter((el) => !preferred.includes(el));
+  return [...preferred, ...rest].slice(0, limit);
+}
+
+async function redactPageState(pageState, { maxElements = 80, maxText = 4000, forAgent = false } = {}) {
+  const elements = usefulElements(pageState.elements || [], maxElements);
+  const bodyText = String(pageState.textForLocalModel || "").slice(0, maxText);
+  const fieldTexts = elements.flatMap((element) => {
+    const values = [String(element.label || "")];
+    if (!element.sensitive && !String(element.value || "").startsWith("[REDACTED:")) {
+      values.push(String(element.value || ""));
+    }
+    return values;
+  });
+
+  // Agent path: NER the body once (what the model reads). Labels use deterministic
+  // patterns only — avoids an 80+ string WebGPU batch that dominated Discord scans.
+  let textResult;
+  let fieldResults;
+  if (forAgent) {
+    const [body] = await textModel.redactBatch([bodyText], {
+      preferModel: true,
+      strictFallback: true,
+      maxChars: maxText,
+    });
+    textResult = body;
+    fieldResults = await textModel.redactBatch(fieldTexts, {
+      preferModel: false,
+      strictFallback: false,
+      maxChars: 240,
+    });
+  } else {
+    const batch = await textModel.redactBatch([bodyText, ...fieldTexts], {
+      preferModel: true,
+      strictFallback: true,
+      maxChars: maxText,
+    });
+    textResult = batch[0];
+    fieldResults = batch.slice(1);
+  }
+
+  let fieldIndex = 0;
+  const safeElements = elements.map((element) => {
+    const safe = { ...element, label: fieldResults[fieldIndex++].text };
+    if (!element.sensitive && !String(element.value || "").startsWith("[REDACTED:")) {
+      safe.value = fieldResults[fieldIndex++].text;
+    }
+    return safe;
+  });
+
+  state.pageState = {
     ...pageState,
     textForLocalModel: undefined,
     elements: safeElements,
     redactedText: textResult.text,
   };
-  renderText(textResult);
   return { textResult, safeElements };
 }
 
-async function scanPage() {
-  setRuntimeStatus("running", "SCANNING");
-  try {
-    if (!hasExtensionRuntime) {
-      throw new Error("Load the built extension in Chrome to scan a real tab.");
-    }
-    const response = await sendRuntime({ type: "SCAN_PAGE" });
-    const pageResponse = unwrapContentResult(response);
-    if (!pageResponse.ok) throw new Error(pageResponse.error);
-    const pageState = pageResponse.result;
-    if (!pageState) throw new Error("The content script returned no page state.");
-    const { textResult, safeElements } = await redactPageState(pageState);
-    const pageRedaction = await sendRuntime({
+async function scanPage({ forAgent = false } = {}) {
+  const started = Date.now();
+  setStatus("busy", "scanning");
+  if (!hasExtensionRuntime) throw new Error("Load the built extension in Chrome.");
+  const response = await sendRuntime({ type: "SCAN_PAGE" });
+  const pageResponse = unwrapContentResult(response);
+  if (!pageResponse.ok) throw new Error(pageResponse.error);
+  const pageState = pageResponse.result;
+  if (!pageState) throw new Error("No page state from content script.");
+
+  const { textResult, safeElements } = await redactPageState(pageState, {
+    maxElements: forAgent ? 36 : 80,
+    maxText: forAgent ? 1800 : 4000,
+    forAgent,
+  });
+
+  // Applying redacted text into Discord's live DOM is expensive and not needed for the agent.
+  let pageRedaction = null;
+  if (!forAgent) {
+    pageRedaction = await sendRuntime({
       type: "APPLY_TEXT_REDACTION",
       redacted: textResult.spans || [],
     });
-    const title = pageState.title || "active page";
-    const pageStatus = pageRedaction?.ok
-      ? ` · page text replaced ${pageRedaction.replaced ?? 0} time(s)`
-      : pageRedaction?.error
-        ? ` · page text was not updated (${pageRedaction.error})`
-        : "";
-    appendEvent("get_page_state", `${safeElements.length} elements · ${textResult.spans.length} text spans · ${title}${pageStatus}${textModel.lastError ? ` · ${textModel.lastError}` : ""}`);
-    setRuntimeStatus(textModel.status === "error" ? "fallback" : "ready", textModel.status === "error" ? "SAFE FALLBACK" : "READY");
-    return pageState;
-  } catch (error) {
-    appendEvent("get_page_state", error instanceof Error ? error.message : String(error), "error");
-    setRuntimeStatus("fallback", "CHECK FAILED");
-    throw error;
   }
+
+  log(
+    "get_page_state",
+    `${safeElements.length} elements · ${textResult.spans.length} spans · ${Date.now() - started}ms · ${pageState.title || "page"}`,
+    {
+      detail: {
+        url: pageState.url,
+        replacedOnPage: pageRedaction?.replaced ?? null,
+        sample: safeElements.slice(0, 6).map(({ ref, role, label }) => ({ ref, role, label })),
+        textPreview: (textResult.text || "").slice(0, 280),
+        nerError: textModel.lastError || null,
+      },
+    },
+  );
+  setStatus(textModel.status === "error" ? "error" : "ready", textModel.status === "error" ? "ner fallback" : "ready");
+  return pageState;
 }
 
 async function captureFrame() {
-  setRuntimeStatus("running", "REDACTING");
-  try {
-    let rawFrame;
-    if (!hasExtensionRuntime) {
-      throw new Error("Load the built extension in Chrome to capture a real viewport.");
-    }
-    const response = await sendRuntime({ type: "CAPTURE_VISIBLE_TAB" });
-    if (!response?.ok || !response.dataUrl) throw new Error(response?.error || "Could not capture the active viewport.");
-    rawFrame = response.dataUrl;
+  setStatus("busy", "redacting");
+  if (!hasExtensionRuntime) throw new Error("Load the built extension in Chrome.");
+  const response = await sendRuntime({ type: "CAPTURE_VISIBLE_TAB" });
+  if (!response?.ok || !response.dataUrl) throw new Error(response?.error || "Capture failed.");
 
-    const redacted = await imageModel.redact(rawFrame);
-    // Do not retain or render rawFrame. The model result is the only frame that reaches the UI.
-    renderFrame(redacted);
-    appendEvent("screenshot", `${redacted.mode} · ${redacted.detections.length} regions · ${redacted.elapsedMs}ms${redacted.error ? ` · ${redacted.error}` : ""}`, redacted.error ? "error" : "");
-    setRuntimeStatus(redacted.error ? "fallback" : "ready", redacted.error ? "SAFE FALLBACK" : "READY");
-    return redacted;
-  } catch (error) {
-    appendEvent("screenshot", error instanceof Error ? error.message : String(error), "error");
-    setRuntimeStatus("fallback", "CHECK FAILED");
-    throw error;
-  }
-}
-
-async function runTextTest() {
-  if (sessionState.busy) return;
-  setBusy(true);
-  setRuntimeStatus("running", "LOADING NER");
-  try {
-    await scanPage();
-  } catch (error) {
-    appendEvent("Privacy Filter", error instanceof Error ? error.message : String(error), "error");
-    setRuntimeStatus("fallback", "CHECK FAILED");
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function runVisualTest() {
-  if (sessionState.busy) return;
-  setBusy(true);
-  setRuntimeStatus("running", "LOADING VISION");
-  try {
-    await captureFrame();
-  } catch (error) {
-    appendEvent("HaS visual mask", error instanceof Error ? error.message : String(error), "error");
-    setRuntimeStatus("fallback", "CHECK FAILED");
-  } finally {
-    setBusy(false);
-  }
+  const redacted = await imageModel.redact(response.dataUrl);
+  showPreview(redacted.dataUrl);
+  log(
+    "screenshot",
+    `${redacted.mode} · ${redacted.detections?.length ?? 0} masks · ${redacted.elapsedMs}ms`,
+    {
+      level: redacted.error ? "warn" : "info",
+      detail: {
+        detections: (redacted.detections || []).slice(0, 12),
+        error: redacted.error || null,
+      },
+    },
+  );
+  setStatus(redacted.error ? "error" : "ready", redacted.error ? "has fallback" : "ready");
+  return redacted;
 }
 
 async function ensurePageState() {
-  if (sessionState.pageState) return sessionState.pageState;
-  return scanPage();
+  if (state.pageState) return state.pageState;
+  await scanPage();
+  return state.pageState;
 }
 
 function toolRef(preferredRole = "") {
-  const candidates = sessionState.pageState?.elements || [];
+  const candidates = state.pageState?.elements || [];
   return (
     candidates.find((item) => item.role === preferredRole && !item.sensitive)?.ref ||
     candidates.find((item) => ["button", "link"].includes(item.role) && !item.sensitive)?.ref ||
@@ -274,7 +331,8 @@ async function redactToolResult(value) {
       .filter(([key]) => !/raw|textForLocalModel/i.test(key))
       .map(async ([key, item]) => {
         if (typeof item === "string" && /label|value|text/i.test(key)) {
-          const redacted = await textModel.redact(item, { preferModel: true, strictFallback: true });
+          // Deterministic only — page body already went through NER; avoid extra WebGPU passes.
+          const redacted = await textModel.redact(item, { preferModel: false, strictFallback: true });
           return [key, redacted.text];
         }
         return [key, await redactToolResult(item)];
@@ -283,20 +341,34 @@ async function redactToolResult(value) {
   return Object.fromEntries(safeEntries);
 }
 
-async function executeTool(toolName) {
-  if (sessionState.busy) return;
+async function executeManualTool(toolName) {
+  if (state.busy) return;
   const definition = getToolDefinition(toolName);
   if (!definition) return;
 
   if (toolName === "get_page_state") {
     setBusy(true);
-    try { await scanPage(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+    try {
+      await scanPage();
+    } catch (error) {
+      log("get_page_state", error instanceof Error ? error.message : String(error), { level: "error" });
+      setStatus("error", "failed");
+    } finally {
+      setBusy(false);
+    }
     return;
   }
 
   if (toolName === "screenshot") {
     setBusy(true);
-    try { await captureFrame(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+    try {
+      await captureFrame();
+    } catch (error) {
+      log("screenshot", error instanceof Error ? error.message : String(error), { level: "error" });
+      setStatus("error", "failed");
+    } finally {
+      setBusy(false);
+    }
     return;
   }
 
@@ -304,7 +376,6 @@ async function executeTool(toolName) {
   try {
     const pageState = ["read_element", "click", "type"].includes(toolName) ? await ensurePageState() : null;
     let tool;
-
     if (toolName === "read_element") {
       tool = { name: toolName, selector_ref: toolRef("textbox") || pageState?.elements?.[0]?.ref };
     } else if (toolName === "click") {
@@ -314,84 +385,341 @@ async function executeTool(toolName) {
     } else if (toolName === "scroll") {
       tool = { name: toolName, direction: "down", amount_px: 320 };
     } else if (toolName === "navigate") {
-      const url = elements.navigateUrl.value.trim();
-      if (!url) throw new Error("Add an http(s) URL in the navigate target field first.");
+      const url = els.navigateUrl.value.trim();
+      if (!url) throw new Error("Set a navigate URL first.");
       tool = { name: toolName, url };
     }
+    if (!tool) throw new Error(`No payload for ${toolName}`);
 
-    if (!tool) throw new Error(`No local test payload is configured for ${toolName}.`);
-    let response;
-    if (hasExtensionRuntime) {
-      response = await sendRuntime({ type: "EXECUTE_TOOL", tool });
-      const result = unwrapContentResult(response);
-      if (!result.ok) throw new Error(result.error);
-      response = result.result;
-    } else {
-      throw new Error("Load the built extension in Chrome to execute tools on a real tab.");
-    }
-
-    const safeResult = await redactToolResult(response);
-    if (toolName === "read_element") {
-      appendEvent(definition.name, `${safeResult?.role || "element"} · ${safeResult?.label || "redacted result"}`);
-      elements.redactedText.textContent = JSON.stringify(safeResult, null, 2);
-      elements.textBadge.textContent = "TOOL RESULT";
-      elements.textBadge.classList.add("active");
-      elements.textSummary.textContent = "read_element returned a client-redacted value.";
-    } else if (toolName === "navigate") {
-      appendEvent(definition.name, `requested ${tool.url}`);
-    } else {
-      appendEvent(definition.name, `${safeResult?.label || safeResult?.ref || safeResult?.direction || "local action complete"}`);
-    }
-    setRuntimeStatus("ready", "READY");
+    log(toolName, "manual test", { detail: tool });
+    const response = await sendRuntime({ type: "EXECUTE_TOOL", tool });
+    const result = unwrapContentResult(response);
+    if (!result.ok) throw new Error(result.error);
+    const safe = await redactToolResult(result.result);
+    log(toolName, "ok", { detail: safe });
+    setStatus("ready", "ready");
   } catch (error) {
-    appendEvent(definition.name, error instanceof Error ? error.message : String(error), "error");
-    setRuntimeStatus("fallback", "ACTION BLOCKED");
+    log(toolName, error instanceof Error ? error.message : String(error), { level: "error" });
+    setStatus("error", "failed");
   } finally {
     setBusy(false);
   }
 }
 
-function clearOutputs() {
-  elements.frameStage.innerHTML = "<div class=\"empty-frame\"><span class=\"empty-frame-icon\">◌</span><span>Capture the active tab to see<br />verified masks land on the frame.</span></div>";
-  elements.frameBadge.textContent = "EMPTY";
-  elements.frameBadge.classList.remove("active");
-  elements.frameSummary.textContent = "Your raw frame is never rendered here.";
-  elements.redactedText.textContent = "Scan the active page to inspect the local model output.";
-  elements.textBadge.textContent = "EMPTY";
-  elements.textBadge.classList.remove("active");
-  elements.textSummary.textContent = "Structured sensitive fields are blocked before serialization.";
-  elements.outputState.textContent = "waiting for a test";
-  sessionState.pageState = null;
-  appendEvent("session", "outputs cleared; model sessions stay warm");
+async function executeAgentTool(name, args = {}) {
+  if (!hasExtensionRuntime) {
+    throw new Error("Load the built extension in Chrome to run the agent.");
+  }
+
+  if (name === "get_page_state") {
+    await scanPage({ forAgent: true });
+    const safe = state.pageState;
+    return {
+      ok: true,
+      url: safe.url,
+      title: safe.title,
+      elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag }) => ({
+        ref,
+        role,
+        label,
+        value,
+        sensitive: Boolean(sensitive),
+        tag,
+      })),
+      text_preview: (safe.redactedText || "").slice(0, 1200),
+    };
+  }
+
+  if (name === "screenshot") {
+    const redacted = await captureFrame();
+    return {
+      ok: true,
+      action: "screenshot",
+      redacted: true,
+      mode: redacted.mode,
+      detection_count: redacted.detections?.length ?? 0,
+      detections: (redacted.detections || []).slice(0, 24).map((item) => ({
+        label: item.label || item.className || item.name || "sensitive",
+        score: item.score,
+      })),
+      elapsed_ms: redacted.elapsedMs,
+      note: "Viewport masked on-device; raw pixels not sent to the chat model.",
+    };
+  }
+
+  const tool = { name, ...args };
+  if (name === "scroll" && tool.amount_px == null) tool.amount_px = 320;
+
+  const response = await sendRuntime({ type: "EXECUTE_TOOL", tool });
+  const result = unwrapContentResult(response);
+  if (!result.ok) throw new Error(result.error);
+  const safeResult = await redactToolResult(result.result);
+  return { ok: true, ...safeResult };
+}
+
+function handleAgentEvent(event) {
+  switch (event.type) {
+    case "start":
+      setStatus("busy", "agent");
+      log("agent", `start · ${event.model}`, {
+        detail: { task: event.task, maxTurns: event.maxTurns, baseUrl: event.baseUrl },
+      });
+      break;
+    case "model_request":
+      setStatus("busy", `turn ${event.turn}`);
+      log("model", `request turn ${event.turn} · ${event.model}`);
+      break;
+    case "model_response": {
+      const bits = [
+        `turn ${event.turn}`,
+        `${event.ms}ms`,
+        event.toolCallCount ? `${event.toolCallCount} tool call(s)` : "final text",
+        event.finishReason || "",
+        event.proxy?.upstream ? `via ${event.proxy.upstream}` : "",
+      ].filter(Boolean);
+      log("model", bits.join(" · "), {
+        detail: {
+          content: event.content || null,
+          usage: event.usage,
+          proxy: event.proxy,
+        },
+      });
+      break;
+    }
+    case "model_error":
+      log("model", event.error, {
+        level: "error",
+        detail: { status: event.status, model: event.model, turn: event.turn },
+      });
+      break;
+    case "model_fallback":
+      log("model", `fallback ${event.from} → ${event.to}`, {
+        level: "warn",
+        detail: event.reason,
+      });
+      if (els.model) els.model.value = event.to;
+      break;
+    case "tool_call":
+      log("tool", `→ ${event.name}`, { detail: event.args });
+      break;
+    case "tool_result":
+      log("tool", `${event.ok ? "←" : "✗"} ${event.name} · ${event.ms}ms`, {
+        level: event.ok ? "info" : "error",
+        detail: event.summary,
+      });
+      break;
+    case "final":
+      log("agent", event.truncated ? `truncated · ${event.ms}ms` : `done · ${event.ms}ms`, {
+        level: event.truncated ? "warn" : "info",
+        detail: event.answer,
+      });
+      setStatus(event.truncated ? "error" : "ready", event.truncated ? "truncated" : "ready");
+      break;
+    default:
+      log("agent", event.type, { detail: event });
+  }
+}
+
+async function pingProxy(baseUrl) {
+  const healthUrl = `${baseUrl.replace(/\/$/, "").replace(/\/v1$/, "")}/health`;
+
+  // Prefer background fetch (has host permissions), then try the side panel directly.
+  if (hasExtensionRuntime) {
+    const response = await sendRuntime({ type: "PROXY_HEALTH", url: healthUrl });
+    if (response?.ok) return response;
+    // Fall through to direct fetch — some Chrome builds block SW→localhost oddly.
+  }
+
+  try {
+    const response = await fetch(healthUrl, { method: "GET" });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, status: response.status, error: data?.error?.message || `HTTP ${response.status}`, data };
+    }
+    return { ok: true, data };
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        `${error instanceof Error ? error.message : String(error)}. ` +
+        `Start the proxy in a terminal: bun run agent-proxy`,
+    };
+  }
+}
+
+async function runAgent() {
+  if (state.busy) return;
+  const task = els.task.value.trim();
+  const apiKey = els.apiKey.value.trim();
+  const model = els.model.value || "deepseek-v4-flash";
+  let baseUrl = (els.baseUrl?.value || AGENT_CONFIG.baseUrl).trim().replace(/\/$/, "");
+
+  if (!task) {
+    log("agent", "Enter a task first.", { level: "warn" });
+    return;
+  }
+  if (!apiKey) {
+    log("agent", "Add an API key under Settings.", { level: "warn" });
+    $("#settings-panel").open = true;
+    return;
+  }
+
+  if (/agentrouter\.org/i.test(baseUrl)) {
+    log("proxy", "Chrome cannot call agentrouter.org directly (WAF). Switching to local proxy URL.", {
+      level: "warn",
+    });
+    baseUrl = AGENT_CONFIG.baseUrl;
+    if (els.baseUrl) els.baseUrl.value = baseUrl;
+    $("#settings-panel").open = true;
+  }
+
+  setBusy(true);
+  setStatus("busy", "agent");
+  try {
+    await saveAgentSettings({ apiKey, model, baseUrl });
+
+    // Finish NER warm-up before tools so get_page_state is inference-only.
+    if (textModel.status !== "ready" && !textModel.unavailable) {
+      setStatus("busy", "loading ner");
+      await textModel.ensureLoaded().catch(() => {});
+    }
+
+    if (/127\.0\.0\.1|localhost/i.test(baseUrl)) {
+      const health = await pingProxy(baseUrl);
+      if (!health?.ok) {
+        throw new Error(
+          `Local proxy not reachable (${health?.error || "no response"}). ` +
+            `In a terminal run: bun run agent-proxy`,
+        );
+      }
+      log("proxy", "local proxy healthy", { detail: health.data || health });
+    }
+
+    const result = await runAgentLoop({
+      task,
+      apiKey,
+      baseUrl,
+      model,
+      executeTool: executeAgentTool,
+      onEvent: handleAgentEvent,
+    });
+    setStatus(result.ok ? "ready" : "error", result.ok ? "ready" : "truncated");
+  } catch (error) {
+    log("agent", error instanceof Error ? error.message : String(error), { level: "error" });
+    setStatus("error", "failed");
+  } finally {
+    setBusy(false);
+  }
 }
 
 const textModel = new TextPrivacyModel((payload) => {
-  setModelStatus(elements.textModelStatus, payload);
-  if (payload.status === "loading") setRuntimeStatus("running", "LOADING NER");
+  setModelDot(els.nerDot, payload.status);
+  if (payload.status === "loading") {
+    setStatus("busy", "loading ner");
+    if (!state._nerLoadLogged) {
+      state._nerLoadLogged = true;
+      log("ner", payload.detail || "loading…");
+    }
+  } else if (payload.status === "ready") {
+    state._nerLoadLogged = false;
+    log("ner", "ready");
+  } else if (payload.status === "error") {
+    state._nerLoadLogged = false;
+    log("ner", payload.detail || "fallback", { level: "warn" });
+  }
 });
 
 const imageModel = new ImagePrivacyModel((payload) => {
-  setModelStatus(elements.imageModelStatus, payload);
-  if (payload.status === "loading") setRuntimeStatus("running", "LOADING VISION");
+  setModelDot(els.hasDot, payload.status);
+  if (payload.status === "loading") {
+    setStatus("busy", "loading has");
+    if (!state._hasLoadLogged) {
+      state._hasLoadLogged = true;
+      log("has", payload.detail || "loading…");
+    }
+  } else if (payload.status === "ready") {
+    state._hasLoadLogged = false;
+    log("has", "ready");
+  } else if (payload.status === "error") {
+    state._hasLoadLogged = false;
+    log("has", payload.detail || "fallback", { level: "warn" });
+  }
 });
 
-$("#test-text").addEventListener("click", runTextTest);
-$("#test-visual").addEventListener("click", runVisualTest);
-$("#scan-page").addEventListener("click", async () => {
-  if (sessionState.busy) return;
-  setBusy(true);
-  try { await scanPage(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+els.run.addEventListener("click", runAgent);
+els.task.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    runAgent();
+  }
 });
-$("#capture-frame").addEventListener("click", async () => {
-  if (sessionState.busy) return;
+els.model.addEventListener("change", () => saveAgentSettings({ model: els.model.value }));
+els.apiKey.addEventListener("change", () => saveAgentSettings({ apiKey: els.apiKey.value }));
+els.baseUrl?.addEventListener("change", () => saveAgentSettings({ baseUrl: els.baseUrl.value }));
+$("#test-has").addEventListener("click", async () => {
+  if (state.busy) return;
   setBusy(true);
-  try { await captureFrame(); } catch { /* the activity feed already shows the error */ } finally { setBusy(false); }
+  try {
+    await captureFrame();
+  } catch (error) {
+    log("has", error instanceof Error ? error.message : String(error), { level: "error" });
+    setStatus("error", "failed");
+  } finally {
+    setBusy(false);
+  }
 });
-$("#clear-output").addEventListener("click", clearOutputs);
-$("#refresh-tab").addEventListener("click", refreshActiveTab);
+$("#test-ner").addEventListener("click", async () => {
+  if (state.busy) return;
+  setBusy(true);
+  try {
+    await scanPage();
+  } catch (error) {
+    log("ner", error instanceof Error ? error.message : String(error), { level: "error" });
+    setStatus("error", "failed");
+  } finally {
+    setBusy(false);
+  }
+});
 document.querySelectorAll("[data-tool]").forEach((button) => {
-  button.addEventListener("click", () => executeTool(button.dataset.tool));
+  button.addEventListener("click", () => executeManualTool(button.dataset.tool));
 });
+els.copyLog.addEventListener("click", copyLog);
+els.clearLog.addEventListener("click", clearLog);
 
-refreshActiveTab();
-appendEvent("runtime", hasExtensionRuntime ? "client-only mode ready; server agent paused" : "Chrome extension runtime not connected");
+clearLog();
+loadAgentSettings()
+  .then(async (settings) => {
+    let baseUrl = settings.baseUrl || AGENT_CONFIG.baseUrl;
+    if (/agentrouter\.org/i.test(baseUrl)) {
+      baseUrl = AGENT_CONFIG.baseUrl;
+      await saveAgentSettings({ baseUrl });
+    }
+    if (settings.apiKey) els.apiKey.value = settings.apiKey;
+    if (settings.model) els.model.value = settings.model;
+    if (els.baseUrl) els.baseUrl.value = baseUrl;
+
+    log("runtime", hasExtensionRuntime ? `ready · ${settings.model || "deepseek-v4-flash"}` : "no extension runtime", {
+      detail: { baseUrl, hint: "Run `bun run agent-proxy` before agent tasks." },
+    });
+
+    if (hasExtensionRuntime && /127\.0\.0\.1|localhost/i.test(baseUrl)) {
+      const health = await pingProxy(baseUrl);
+      if (health?.ok) {
+        log("proxy", "local proxy is up");
+      } else {
+        log("proxy", "local proxy is down — run: bun run agent-proxy", {
+          level: "warn",
+          detail: health?.error || null,
+        });
+      }
+    }
+
+    setStatus(hasExtensionRuntime ? "ready" : "error", hasExtensionRuntime ? "ready" : "no runtime");
+
+    // Warm NER off the critical path so the first get_page_state is not a 30s+ cold load.
+    textModel.ensureLoaded().catch(() => {});
+  })
+  .catch((error) => {
+    log("runtime", error instanceof Error ? error.message : String(error), { level: "error" });
+    setStatus("error", "failed");
+  });

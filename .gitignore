@@ -5,6 +5,15 @@ dist/
 .DS_Store
 :memory:.ses
 tools/__pycache__/
+tools/agentrouter-proxy/proxy
+tools/agentrouter-proxy/proxy-*
+scripts/__pycache__/
+.env
+.env.local
+.env.*.local
+*.pem
+**/agent-secrets.json
+.tmp-agent-body.json
 
 # Model weights (download separately — see public/models/README.md)
 public/models/**/*.onnx

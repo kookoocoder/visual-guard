@@ -5,6 +5,7 @@ env.allowRemoteModels = false;
 
 const MODEL_ID = "openai/privacy-filter";
 const MODEL_PATH = "models/privacy-filter";
+const MAX_MODEL_CHARS = 4000;
 
 function runtimeUrl(path) {
   if (globalThis.chrome?.runtime?.getURL) return chrome.runtime.getURL(path);
@@ -131,10 +132,12 @@ export class TextPrivacyModel {
   constructor(onStatus = () => {}) {
     this.onStatus = onStatus;
     this.classifier = null;
+    this.loadingPromise = null;
     this.status = "idle";
     this.lastError = "";
     this.unavailable = false;
     this.modelPath = runtimeUrl(MODEL_PATH);
+    this._lastProgressLog = 0;
   }
 
   updateStatus(status, detail = "") {
@@ -146,45 +149,56 @@ export class TextPrivacyModel {
   async ensureLoaded() {
     if (this.classifier) return this.classifier;
     if (this.unavailable) throw new Error(this.lastError || "The local NER model is unavailable.");
+    if (this.loadingPromise) return this.loadingPromise;
+
     if (!globalThis.navigator?.gpu) {
       this.unavailable = true;
       this.updateStatus("error", "WebGPU is unavailable in this browser context.");
       throw new Error("WebGPU is unavailable in this browser context.");
     }
 
-    this.updateStatus("loading", "Opening packaged Privacy Filter weights…");
-    try {
-      this.classifier = await pipeline("token-classification", this.modelPath, {
-        device: "webgpu",
-        dtype: "q4f16",
-        local_files_only: true,
-        use_external_data_format: true,
-        progress_callback: (progress) => {
-          if (progress?.status === "progress" && Number.isFinite(progress.progress)) {
+    this.updateStatus("loading", "Loading Privacy Filter…");
+    this.loadingPromise = (async () => {
+      try {
+        this.classifier = await pipeline("token-classification", this.modelPath, {
+          device: "webgpu",
+          dtype: "q4f16",
+          local_files_only: true,
+          use_external_data_format: true,
+          progress_callback: (progress) => {
+            // Transformers fires this hundreds of times — keep the UI quiet.
+            if (progress?.status !== "progress" || !Number.isFinite(progress.progress)) return;
+            const pct = Math.round(progress.progress);
+            const now = Date.now();
+            if (pct < 100 && now - this._lastProgressLog < 2500) return;
+            this._lastProgressLog = now;
             this.onStatus({
               status: "loading",
-              detail: `Loading local NER · ${Math.round(progress.progress)}%`,
+              detail: `Loading NER · ${pct}%`,
               model: MODEL_ID,
             });
-          }
-        },
-      });
-      this.updateStatus("ready", "WebGPU · q4f16 · local");
-      return this.classifier;
-    } catch (error) {
-      this.classifier = null;
-      this.unavailable = true;
-      const message = error instanceof Error ? error.message : String(error);
-      this.updateStatus("error", message);
-      throw error;
-    }
+          },
+        });
+        this.updateStatus("ready", "WebGPU · q4f16 · local");
+        return this.classifier;
+      } catch (error) {
+        this.classifier = null;
+        this.loadingPromise = null;
+        this.unavailable = true;
+        const message = error instanceof Error ? error.message : String(error);
+        this.updateStatus("error", message);
+        throw error;
+      }
+    })();
+
+    return this.loadingPromise;
   }
 
   async redact(text, options = {}) {
     return (await this.redactBatch([text], options))[0];
   }
 
-  async redactBatch(texts = [], { preferModel = true, strictFallback = false } = {}) {
+  async redactBatch(texts = [], { preferModel = true, strictFallback = false, maxChars = MAX_MODEL_CHARS } = {}) {
     const sources = texts.map((text) => String(text ?? ""));
     const spansByText = sources.map(deterministicSpans);
     let modelOutputs = null;
@@ -193,11 +207,11 @@ export class TextPrivacyModel {
     if (preferModel && sources.some(Boolean)) {
       try {
         const classifier = await this.ensureLoaded();
-        const output = await classifier(
-          sources.map((source) => source.slice(0, 12000)),
-          { aggregation_strategy: "simple" },
-        );
-        modelOutputs = Array.isArray(output) ? output : [];
+        const clipped = sources.map((source) => source.slice(0, maxChars));
+        // Single-string call is faster than a 1-element batch in transformers.js.
+        const input = clipped.length === 1 ? clipped[0] : clipped;
+        const output = await classifier(input, { aggregation_strategy: "simple" });
+        modelOutputs = clipped.length === 1 ? [output] : Array.isArray(output) ? output : [];
       } catch {
         modelFailed = true;
       }
@@ -215,7 +229,7 @@ export class TextPrivacyModel {
 
       const modelOutput = modelOutputs?.[index];
       const spans = [...spansByText[index]];
-      if (Array.isArray(modelOutput)) spans.push(...normalizeModelOutput(modelOutput, source));
+      if (Array.isArray(modelOutput)) spans.push(...normalizeModelOutput(modelOutput, source.slice(0, maxChars)));
       const merged = mergeSpans(spans.filter((span) => redactionPlaceholder(span.kind)));
       return {
         text: applySpans(source, merged),
@@ -229,13 +243,13 @@ export class TextPrivacyModel {
     });
   }
 
-  async redactElements(elements = [], { strictFallback = false } = {}) {
+  async redactElements(elements = [], { strictFallback = false, preferModel = true } = {}) {
     const fields = elements.flatMap((element) => {
       const values = [element.label];
       if (!element.sensitive && !String(element.value).startsWith("[REDACTED:")) values.push(element.value);
       return values;
     });
-    const redactedFields = await this.redactBatch(fields, { strictFallback });
+    const redactedFields = await this.redactBatch(fields, { strictFallback, preferModel, maxChars: 500 });
     let fieldIndex = 0;
 
     return elements.map((element) => {
