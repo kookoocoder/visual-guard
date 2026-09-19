@@ -13,16 +13,45 @@
     secret: "[REDACTED:SECRET]",
   };
 
+  const INTERACTIVE_SELECTOR = [
+    "button",
+    "a[href]",
+    "input",
+    "textarea",
+    "select",
+    "label",
+    "summary",
+    "option",
+    "[contenteditable='true']",
+    "[role='button']",
+    "[role='link']",
+    "[role='checkbox']",
+    "[role='radio']",
+    "[role='tab']",
+    "[role='menuitem']",
+    "[role='option']",
+    "[role='switch']",
+    "[role='textbox']",
+    "[role='combobox']",
+    "[role='listitem']",
+    "[role='treeitem']",
+    "[role='heading']",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+  ].join(",");
+
   function clean(value, limit = 160) {
     return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
   }
 
   function isVisible(element) {
     const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
+    const style = element.ownerDocument?.defaultView?.getComputedStyle(element) || window.getComputedStyle(element);
     return (
-      rect.width > 0 &&
-      rect.height > 0 &&
+      rect.width > 1 &&
+      rect.height > 1 &&
       style.display !== "none" &&
       style.visibility !== "hidden" &&
       Number(style.opacity) !== 0
@@ -53,23 +82,31 @@
 
   function getLabel(element) {
     const aria = element.getAttribute("aria-label");
-    if (aria) return clean(aria);
+    if (aria) return clean(aria, 240);
 
     const labelledBy = element.getAttribute("aria-labelledby");
     if (labelledBy) {
+      const doc = element.ownerDocument || document;
       const label = labelledBy
         .split(/\s+/)
-        .map((id) => document.getElementById(id)?.textContent)
+        .map((id) => doc.getElementById(id)?.textContent)
         .filter(Boolean)
         .join(" ");
-      if (label) return clean(label);
+      if (label) return clean(label, 240);
     }
 
     if (element.labels?.length) {
       const label = Array.from(element.labels)
         .map((item) => item.textContent)
         .join(" ");
-      if (label) return clean(label);
+      if (label) return clean(label, 240);
+    }
+
+    if (element.tagName === "INPUT" && (element.type === "radio" || element.type === "checkbox")) {
+      const parentLabel = element.closest("label");
+      if (parentLabel) return clean(parentLabel.textContent, 240);
+      const next = element.nextElementSibling;
+      if (next) return clean(next.textContent, 240);
     }
 
     return clean(
@@ -77,25 +114,61 @@
         element.getAttribute("title") ||
         element.getAttribute("alt") ||
         element.textContent,
+      240,
     );
   }
 
   function roleFor(element) {
     if (element.getAttribute("role")) return element.getAttribute("role");
     const tag = element.tagName.toLowerCase();
+    const type = (element.getAttribute("type") || "").toLowerCase();
     if (tag === "a") return "link";
     if (tag === "button") return "button";
-    if (tag === "input") return "textbox";
+    if (tag === "label") return "label";
+    if (tag === "input") {
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      if (type === "submit" || type === "button") return "button";
+      return "textbox";
+    }
     if (tag === "textarea") return "textbox";
     if (tag === "select") return "combobox";
+    if (tag === "option") return "option";
     if (/^h[1-6]$/.test(tag)) return "heading";
     return "region";
+  }
+
+  function absoluteBounds(element) {
+    const rect = element.getBoundingClientRect();
+    let x = rect.x;
+    let y = rect.y;
+    let view = element.ownerDocument?.defaultView;
+    while (view && view !== window.top && view.frameElement) {
+      const frameRect = view.frameElement.getBoundingClientRect();
+      x += frameRect.x;
+      y += frameRect.y;
+      view = view.parent;
+    }
+    return {
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
   }
 
   function serializeElement(element) {
     const kind = sensitiveKind(element);
     const value = "value" in element ? String(element.value ?? "") : "";
-    const rect = element.getBoundingClientRect();
+    const bounds = absoluteBounds(element);
+    const checked =
+      element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
+        ? Boolean(element.checked)
+        : element.getAttribute("aria-checked") === "true"
+          ? true
+          : element.getAttribute("aria-checked") === "false"
+            ? false
+            : undefined;
 
     return {
       ref: getRef(element),
@@ -103,35 +176,90 @@
       tag: element.tagName.toLowerCase(),
       label: getLabel(element) || "Unlabeled element",
       value: kind ? SENSITIVE_REDACTIONS[kind] : clean(value, 240),
+      checked,
       sensitive: Boolean(kind),
       sensitiveKind: kind || undefined,
-      bounds: {
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      },
+      bounds,
     };
   }
 
-  function collectElements() {
-    const selector = [
-      "button",
-      "a[href]",
-      "input",
-      "textarea",
-      "select",
-      "[role]",
-      "[contenteditable='true']",
-      "h1",
-      "h2",
-      "h3",
-    ].join(",");
+  function collectDocuments() {
+    // One document per content-script world. Cross-frame coverage comes from
+    // manifest all_frames + background gatherPageState.
+    return document.body ? [document] : [];
+  }
 
-    return Array.from(document.querySelectorAll(selector))
-      .filter(isVisible)
-      .slice(0, 60)
-      .map(serializeElement);
+  function mainRoot(doc = document) {
+    return (
+      doc.querySelector("main, [role='main'], #content, #main, .main-content, .course-content, .assessment, .quiz") ||
+      doc.body
+    );
+  }
+
+  function inNavChrome(element) {
+    return Boolean(
+      element.closest(
+        "nav, header, footer, aside, [role='navigation'], [role='banner'], [role='complementary'], .sidebar, .side-nav, .course-nav, #course-nav",
+      ),
+    );
+  }
+
+  function viewportScore(bounds) {
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const cx = bounds.x + bounds.width / 2;
+    const cy = bounds.y + bounds.height / 2;
+    const inView = cx >= 0 && cy >= 0 && cx <= vw && cy <= vh;
+    if (!inView) return -Math.abs(cy - vh / 2) / vh;
+    const centerDist = Math.hypot(cx - vw * 0.55, cy - vh * 0.45) / Math.hypot(vw, vh);
+    return 1.5 - centerDist;
+  }
+
+  function elementPriority(serialized, element) {
+    const role = serialized.role;
+    let score = viewportScore(serialized.bounds);
+    if (["radio", "checkbox", "textbox", "combobox", "option", "heading", "button", "label"].includes(role)) {
+      score += 3;
+    }
+    if (["link", "tab", "menuitem", "treeitem"].includes(role)) score += 0.5;
+    if (element.type === "radio" || element.type === "checkbox") score += 4;
+    if (!inNavChrome(element)) score += 4;
+    else score -= 3;
+    if (mainRoot(element.ownerDocument || document).contains(element)) score += 2;
+    const label = serialized.label.toLowerCase();
+    if (/question|option|answer|submit|next|previous|choice|mcq|assessment/i.test(label)) score += 3;
+    if (/jump to|skip to|donate|log in|sign in|cookie/i.test(label)) score -= 2;
+    return score;
+  }
+
+  function collectElements(limit = 120) {
+    const collected = [];
+    const seen = new Set();
+
+    for (const doc of collectDocuments()) {
+      for (const element of doc.querySelectorAll(INTERACTIVE_SELECTOR)) {
+        if (seen.has(element) || !isVisible(element)) continue;
+        seen.add(element);
+        const serialized = serializeElement(element);
+        if (!serialized.label || serialized.label === "Unlabeled element") continue;
+        collected.push({ element, serialized, score: elementPriority(serialized, element) });
+      }
+    }
+
+    collected.sort((a, b) => b.score - a.score);
+    return collected.slice(0, limit).map((item) => item.serialized);
+  }
+
+  function collectReadableText(maxChars = 8000) {
+    const chunks = [];
+    for (const doc of collectDocuments()) {
+      const root = mainRoot(doc);
+      const text = clean(root?.innerText || doc.body?.innerText || "", maxChars);
+      if (text) chunks.push(text);
+    }
+    const joined = chunks.join("\n\n").slice(0, maxChars);
+    if (joined.length >= 200) return joined;
+    return clean(document.body?.innerText || "", maxChars);
   }
 
   const REAL_REDACTION_KEYS = new Set([
@@ -274,20 +402,25 @@
   }
 
   function pageState() {
-    const bodyText = clean(document.body?.innerText || "", 6000);
+    // Drop stale refs that were removed from the DOM so click/type stay reliable.
+    for (const [ref, element] of [...elementsByRef.entries()]) {
+      if (!element?.isConnected) elementsByRef.delete(ref);
+    }
+
     return {
       url: location.href,
       title: document.title || "Untitled page",
-      elements: collectElements(),
-      textForLocalModel: bodyText,
+      elements: collectElements(120),
+      textForLocalModel: collectReadableText(8000),
+      frame: window === window.top ? "top" : "iframe",
       capturedAt: new Date().toISOString(),
     };
   }
 
   function resolve(ref) {
     const element = elementsByRef.get(ref);
-    if (!element || !document.contains(element)) {
-      throw new Error(`Element ${ref || "(missing ref)"} is no longer on the page.`);
+    if (!element || !element.isConnected) {
+      throw new Error(`Element ${ref || "(missing ref)"} is no longer on the page. Call get_page_state again.`);
     }
     return element;
   }
@@ -304,43 +437,145 @@
 
   function readElement(selectorRef) {
     const element = resolve(selectorRef);
-    return {
-      ...serializeElement(element),
-      value: serializeElement(element).value,
+    return serializeElement(element);
+  }
+
+  function firePointer(element, type) {
+    const view = element.ownerDocument?.defaultView || window;
+    const rect = element.getBoundingClientRect();
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view,
+      clientX: Math.round(rect.left + rect.width / 2),
+      clientY: Math.round(rect.top + rect.height / 2),
+      button: 0,
+      buttons: type === "mouseup" || type === "click" ? 0 : 1,
     };
+    try {
+      if (typeof PointerEvent === "function") {
+        element.dispatchEvent(
+          new PointerEvent(type.replace("mouse", "pointer"), {
+            ...opts,
+            pointerId: 1,
+            pointerType: "mouse",
+            isPrimary: true,
+          }),
+        );
+      }
+    } catch {
+      // Older pages / restricted nodes may reject PointerEvent.
+    }
+    element.dispatchEvent(new MouseEvent(type, opts));
   }
 
   function clickElement(selectorRef) {
     const element = resolve(selectorRef);
-    element.scrollIntoView({ behavior: "smooth", block: "center" });
-    element.click();
-    return { action: "click", ref: selectorRef, label: getLabel(element) || "element" };
+    element.scrollIntoView({ block: "center", inline: "nearest" });
+
+    const target =
+      element.tagName === "LABEL" && element.control
+        ? element.control
+        : element;
+
+    try {
+      target.focus?.({ preventScroll: true });
+    } catch {
+      target.focus?.();
+    }
+
+    firePointer(target, "mouseover");
+    firePointer(target, "mousedown");
+    firePointer(target, "mouseup");
+    firePointer(target, "click");
+    target.click?.();
+
+    if (target instanceof HTMLInputElement && (target.type === "checkbox" || target.type === "radio") && !target.checked) {
+      target.checked = true;
+      target.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    }
+
+    return { action: "click", ref: selectorRef, label: getLabel(element) || "element", role: roleFor(element) };
   }
 
   function typeElement(selectorRef, text) {
     const element = resolve(selectorRef);
     const kind = sensitiveKind(element);
     if (kind) {
-      throw new Error("Typing into sensitive fields is blocked in the local test harness.");
+      throw new Error("Typing into sensitive fields is blocked.");
     }
-    if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)) {
+
+    const editable =
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element.isContentEditable ||
+      element.getAttribute("role") === "textbox";
+
+    if (!editable) {
       throw new Error("The selected element is not editable.");
+    }
+
+    element.scrollIntoView({ block: "center", inline: "nearest" });
+    try {
+      element.focus({ preventScroll: true });
+    } catch {
+      element.focus();
     }
 
     if (element.isContentEditable) {
       element.textContent = text;
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }));
     } else {
       dispatchInput(element, text);
     }
     return { action: "type", ref: selectorRef, text, label: getLabel(element) || "element" };
   }
 
+  function findScrollable(from = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2)) {
+    let node = from;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = window.getComputedStyle(node);
+      const overflowY = style.overflowY;
+      if ((overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") && node.scrollHeight > node.clientHeight + 20) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+
+    const main = mainRoot();
+    if (main && main.scrollHeight > main.clientHeight + 20) return main;
+
+    for (const candidate of document.querySelectorAll("main, [role='main'], .course-content, .assessment, .quiz, #content")) {
+      if (candidate.scrollHeight > candidate.clientHeight + 20) return candidate;
+    }
+
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function scrollPage(direction, amountPx) {
+    const amount = Math.max(80, Math.min(1600, Number(amountPx) || 320));
+    const delta = direction === "up" ? -amount : amount;
+    const target = findScrollable();
+    const before = target.scrollTop;
+    target.scrollBy({ top: delta, behavior: "auto" });
+    if (Math.abs(target.scrollTop - before) < 2) {
+      window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+    }
+    return {
+      action: "scroll",
+      direction,
+      amountPx: amount,
+      scrolledTop: Math.round(target.scrollTop || window.scrollY || 0),
+    };
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       switch (message.type) {
         case "PING":
-          sendResponse({ ok: true });
+          sendResponse({ ok: true, frame: window === window.top ? "top" : "iframe" });
           break;
         case "GET_PAGE_STATE":
           sendResponse({ ok: true, result: pageState() });
@@ -357,12 +592,12 @@
         case "TYPE":
           sendResponse({ ok: true, result: typeElement(message.selectorRef, message.text || "Local test") });
           break;
-        case "SCROLL": {
-          const amount = Math.max(80, Math.min(1200, Number(message.amountPx) || 320));
-          window.scrollBy({ top: message.direction === "up" ? -amount : amount, behavior: "smooth" });
-          sendResponse({ ok: true, result: { action: "scroll", direction: message.direction, amountPx: amount } });
+        case "SCROLL":
+          sendResponse({
+            ok: true,
+            result: scrollPage(message.direction === "up" ? "up" : "down", message.amountPx),
+          });
           break;
-        }
         default:
           sendResponse({ ok: false, error: `Unknown content action: ${message.type}` });
       }

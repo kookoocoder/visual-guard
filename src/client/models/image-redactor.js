@@ -1,6 +1,17 @@
 import * as ort from "onnxruntime-web/webgpu";
+import { ensureHasModelBuffer, HAS_MODEL_URL } from "./remote-assets.js";
+import {
+  evictOthers,
+  installMemoryListeners,
+  registerResident,
+  touchModel,
+  unregisterResident,
+  withLoadLock,
+  yieldToUi,
+} from "./memory-manager.js";
 
 const MODEL_PATH = "models/has/model.onnx";
+const RESIDENT_ID = "has";
 const INPUT_SIZE = 640;
 const PRIVACY_CLASSES = [
   "face",
@@ -245,8 +256,10 @@ export class ImagePrivacyModel {
     this.onStatus = onStatus;
     this.session = null;
     this.inputName = null;
-    this.modelUrl = runtimeUrl(MODEL_PATH);
+    this.loadingPromise = null;
     this.status = "idle";
+    this._unloadTimer = null;
+    installMemoryListeners();
   }
 
   updateStatus(status, detail = "") {
@@ -254,37 +267,123 @@ export class ImagePrivacyModel {
     this.onStatus({ status, detail, model: "xuanwulab/HaS_Image_0209_FP32" });
   }
 
+  async dispose() {
+    if (this._unloadTimer) {
+      clearTimeout(this._unloadTimer);
+      this._unloadTimer = null;
+    }
+    unregisterResident(RESIDENT_ID);
+    const session = this.session;
+    this.session = null;
+    this.inputName = null;
+    this.loadingPromise = null;
+    if (this.status !== "error") this.updateStatus("idle", "unloaded · freed RAM");
+    if (session) {
+      try {
+        if (typeof session.release === "function") await session.release();
+        else if (typeof session.dispose === "function") await session.dispose();
+      } catch {
+        // ignore
+      }
+    }
+    await yieldToUi(0);
+  }
+
+  scheduleUnload(ms = 20_000) {
+    if (this._unloadTimer) clearTimeout(this._unloadTimer);
+    this._unloadTimer = setTimeout(() => {
+      this._unloadTimer = null;
+      this.dispose().catch(() => {});
+    }, ms);
+  }
+
   async ensureLoaded() {
-    if (this.session) return this.session;
+    if (this.session) {
+      touchModel(RESIDENT_ID);
+      return this.session;
+    }
+    if (this.loadingPromise) return this.loadingPromise;
+
     if (!globalThis.navigator?.gpu) {
       this.updateStatus("error", "WebGPU is unavailable in this browser context.");
       throw new Error("WebGPU is unavailable in this browser context.");
     }
 
-    this.updateStatus("loading", "Opening packaged HaS ONNX weights…");
-    try {
-      this.session = await ort.InferenceSession.create(this.modelUrl, {
-        executionProviders: ["webgpu"],
-        graphOptimizationLevel: "all",
-      });
-      this.inputName = this.session.inputNames[0];
-      this.updateStatus("ready", "WebGPU · local ONNX");
-      return this.session;
-    } catch (error) {
-      this.session = null;
-      const message = error instanceof Error ? error.message : String(error);
-      this.updateStatus("error", message);
-      throw error;
-    }
+    this.loadingPromise = withLoadLock(async () => {
+      try {
+        this.updateStatus("loading", "Preparing HaS (unloading other models)…");
+        await evictOthers(RESIDENT_ID);
+        await yieldToUi(16);
+
+        let modelSource;
+        try {
+          const buffer = await ensureHasModelBuffer({
+            onProgress: (p) => {
+              if (p.status === "cached") {
+                this.updateStatus("loading", "Opening cached HaS ONNX…");
+                return;
+              }
+              if (p.status === "download") {
+                const mb = p.total ? `${(p.loaded / 1e6).toFixed(0)}/${(p.total / 1e6).toFixed(0)} MB` : "";
+                this.updateStatus("loading", `Downloading HaS · ${p.pct}%${mb ? ` · ${mb}` : ""}`);
+              }
+            },
+          });
+          modelSource = buffer;
+        } catch (remoteError) {
+          const localUrl = runtimeUrl(MODEL_PATH);
+          try {
+            const probe = await fetch(localUrl);
+            if (!probe.ok) throw remoteError;
+            this.updateStatus("loading", "Opening packaged HaS ONNX…");
+            modelSource = await probe.arrayBuffer();
+          } catch {
+            throw remoteError;
+          }
+        }
+
+        await yieldToUi(0);
+        this.session = await ort.InferenceSession.create(modelSource, {
+          executionProviders: ["webgpu"],
+          graphOptimizationLevel: "all",
+        });
+        modelSource = null;
+
+        this.inputName = this.session.inputNames[0];
+        registerResident(RESIDENT_ID, { unload: () => this.dispose() });
+        touchModel(RESIDENT_ID);
+        this.updateStatus("ready", "WebGPU · cached ONNX");
+        return this.session;
+      } catch (error) {
+        this.session = null;
+        this.loadingPromise = null;
+        const message = error instanceof Error ? error.message : String(error);
+        this.updateStatus("error", message);
+        throw error;
+      }
+    });
+
+    return this.loadingPromise;
   }
 
   async infer(dataUrl) {
     const session = await this.ensureLoaded();
+    touchModel(RESIDENT_ID);
     const image = await loadImage(dataUrl);
+    await yieldToUi(0);
     const input = await preprocess(image);
-    const outputs = await session.run({ [this.inputName]: input });
+    const feeds = { [this.inputName]: input };
+    const outputs = await session.run(feeds);
     const { detections, prototypes } = pickOutputs(outputs);
-    return { image, detections: createMasks(detections, prototypes) };
+    const masked = createMasks(detections, prototypes).map(({ maskCoefficients, ...rest }) => rest);
+    // Release ORT output tensors promptly.
+    try {
+      for (const tensor of Object.values(outputs || {})) tensor?.dispose?.();
+      input?.dispose?.();
+    } catch {
+      // ignore
+    }
+    return { image, detections: masked };
   }
 
   async redact(dataUrl) {
@@ -293,13 +392,18 @@ export class ImagePrivacyModel {
     try {
       const { detections } = await this.infer(dataUrl);
       const redactedUrl = drawRedactedFrame(image, detections, { label: "MODEL MASK" });
+      // Drop raster masks from the return payload (they are huge TypedArrays).
+      const lightDetections = detections.map(({ mask, ...rest }) => rest);
+      // Screenshots are rare — free HaS soon so NER can reclaim RAM.
+      this.scheduleUnload(12_000);
       return {
         dataUrl: redactedUrl,
-        detections,
-        mode: "webgpu + local HaS ONNX",
+        detections: lightDetections,
+        mode: "webgpu + HaS ONNX (cached)",
         elapsedMs: Math.round(performance.now() - started),
       };
     } catch (error) {
+      this.scheduleUnload(5_000);
       return {
         dataUrl: safeFallbackFrame(image),
         detections: [],
@@ -314,6 +418,6 @@ export class ImagePrivacyModel {
 export const imageModelInfo = {
   id: "xuanwulab/HaS_Image_0209_FP32",
   title: "HaS visual mask",
-  runtime: "ONNX Runtime Web · WebGPU",
-  modelPath: MODEL_PATH,
+  runtime: "ONNX Runtime Web · WebGPU · Hub download",
+  modelPath: HAS_MODEL_URL,
 };

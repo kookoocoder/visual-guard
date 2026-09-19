@@ -1,10 +1,22 @@
 import { env, pipeline } from "@huggingface/transformers";
+import { NER_MODEL_ID } from "./remote-assets.js";
+import {
+  evictOthers,
+  installMemoryListeners,
+  registerResident,
+  touchModel,
+  unregisterResident,
+  withLoadLock,
+  yieldToUi,
+} from "./memory-manager.js";
 
+// Prefer Hub download + browser cache. Packaged weights are no longer shipped.
 env.allowLocalModels = true;
-env.allowRemoteModels = false;
+env.allowRemoteModels = true;
+env.useBrowserCache = true;
 
-const MODEL_ID = "openai/privacy-filter";
-const MODEL_PATH = "models/privacy-filter";
+const MODEL_ID = NER_MODEL_ID;
+const RESIDENT_ID = "ner";
 const MAX_MODEL_CHARS = 4000;
 
 function runtimeUrl(path) {
@@ -13,9 +25,10 @@ function runtimeUrl(path) {
 }
 
 if (env.backends?.onnx?.wasm) {
+  // Single ORT wasm (v129) shared with HaS — no second 23MB copy.
   env.backends.onnx.wasm.wasmPaths = {
-    mjs: runtimeUrl("wasm/v126/ort-wasm-simd-threaded.asyncify.mjs"),
-    wasm: runtimeUrl("wasm/v126/ort-wasm-simd-threaded.asyncify.wasm"),
+    mjs: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.mjs"),
+    wasm: runtimeUrl("wasm/v129/ort-wasm-simd-threaded.asyncify.wasm"),
   };
 }
 
@@ -111,9 +124,10 @@ function deterministicSpans(text) {
 
 function normalizeModelOutput(output, text) {
   const items = Array.isArray(output) ? output : [];
+  const maxSpan = Math.max(48, Math.floor(text.length * 0.35));
   let searchFrom = 0;
   return items
-    .filter((item) => Number(item.score ?? item.confidence ?? 0) >= 0.35)
+    .filter((item) => Number(item.score ?? item.confidence ?? 0) >= 0.45)
     .map((item) => {
       const word = String(item.word ?? item.token ?? "").replace(/^##/, "");
       const start = Number.isFinite(item.start) ? item.start : text.indexOf(word, searchFrom);
@@ -125,7 +139,21 @@ function normalizeModelOutput(output, text) {
         kind: modelUrlLabel(item.entity_group ?? item.entity),
         score: Number(item.score ?? item.confidence ?? 0),
       };
+    })
+    .filter((span) => {
+      if (!(span.end > span.start) || span.start < 0) return false;
+      const length = span.end - span.start;
+      if (length > maxSpan && !["EMAIL", "PHONE", "CARD", "PASSWORD", "SECRET"].includes(span.kind)) {
+        return false;
+      }
+      return true;
     });
+}
+
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(0)} MB`;
 }
 
 export class TextPrivacyModel {
@@ -136,8 +164,12 @@ export class TextPrivacyModel {
     this.status = "idle";
     this.lastError = "";
     this.unavailable = false;
-    this.modelPath = runtimeUrl(MODEL_PATH);
     this._lastProgressLog = 0;
+    installMemoryListeners();
+  }
+
+  get ready() {
+    return this.status === "ready" && Boolean(this.classifier);
   }
 
   updateStatus(status, detail = "") {
@@ -146,8 +178,27 @@ export class TextPrivacyModel {
     this.onStatus({ status, detail, model: MODEL_ID });
   }
 
+  async dispose() {
+    unregisterResident(RESIDENT_ID);
+    const classifier = this.classifier;
+    this.classifier = null;
+    this.loadingPromise = null;
+    if (this.status !== "error") this.updateStatus("idle", "unloaded · freed RAM");
+    if (classifier?.dispose) {
+      try {
+        await classifier.dispose();
+      } catch {
+        // ignore dispose races
+      }
+    }
+    await yieldToUi(0);
+  }
+
   async ensureLoaded() {
-    if (this.classifier) return this.classifier;
+    if (this.classifier) {
+      touchModel(RESIDENT_ID);
+      return this.classifier;
+    }
     if (this.unavailable) throw new Error(this.lastError || "The local NER model is unavailable.");
     if (this.loadingPromise) return this.loadingPromise;
 
@@ -157,29 +208,50 @@ export class TextPrivacyModel {
       throw new Error("WebGPU is unavailable in this browser context.");
     }
 
-    this.updateStatus("loading", "Loading Privacy Filter…");
-    this.loadingPromise = (async () => {
+    this.updateStatus("loading", "Downloading Privacy Filter (first run)…");
+    this.loadingPromise = withLoadLock(async () => {
       try {
-        this.classifier = await pipeline("token-classification", this.modelPath, {
+        // Never keep HaS + NER in VRAM/RAM at once.
+        await evictOthers(RESIDENT_ID);
+        await yieldToUi(16);
+
+        this.classifier = await pipeline("token-classification", MODEL_ID, {
           device: "webgpu",
           dtype: "q4f16",
-          local_files_only: true,
+          local_files_only: false,
           use_external_data_format: true,
           progress_callback: (progress) => {
-            // Transformers fires this hundreds of times — keep the UI quiet.
-            if (progress?.status !== "progress" || !Number.isFinite(progress.progress)) return;
-            const pct = Math.round(progress.progress);
             const now = Date.now();
-            if (pct < 100 && now - this._lastProgressLog < 2500) return;
+            if (now - this._lastProgressLog < 1200) return;
             this._lastProgressLog = now;
-            this.onStatus({
-              status: "loading",
-              detail: `Loading NER · ${pct}%`,
-              model: MODEL_ID,
-            });
+
+            if (progress?.status === "progress" && Number.isFinite(progress.progress)) {
+              const pct = Math.round(progress.progress);
+              const file = String(progress.file || progress.name || "model").split("/").pop();
+              const loaded = formatBytes(progress.loaded);
+              const total = formatBytes(progress.total);
+              const size = loaded && total ? ` · ${loaded}/${total}` : "";
+              this.onStatus({
+                status: "loading",
+                detail: `NER ${file} · ${pct}%${size}`,
+                model: MODEL_ID,
+              });
+              return;
+            }
+
+            if (progress?.status === "download" || progress?.status === "Downloading") {
+              this.onStatus({
+                status: "loading",
+                detail: `Downloading NER · ${String(progress.file || "").split("/").pop() || "weights"}`,
+                model: MODEL_ID,
+              });
+            }
           },
         });
-        this.updateStatus("ready", "WebGPU · q4f16 · local");
+
+        registerResident(RESIDENT_ID, { unload: () => this.dispose() });
+        touchModel(RESIDENT_ID);
+        this.updateStatus("ready", "WebGPU · q4f16 · cached");
         return this.classifier;
       } catch (error) {
         this.classifier = null;
@@ -189,7 +261,7 @@ export class TextPrivacyModel {
         this.updateStatus("error", message);
         throw error;
       }
-    })();
+    });
 
     return this.loadingPromise;
   }
@@ -204,26 +276,39 @@ export class TextPrivacyModel {
     let modelOutputs = null;
     let modelFailed = false;
 
-    if (preferModel && sources.some(Boolean)) {
+    const canUseModel = preferModel && this.ready && sources.some(Boolean);
+    // Do not auto-start a multi-hundred-MB load from every redact call — sidepanel decides.
+    if (canUseModel) {
       try {
-        const classifier = await this.ensureLoaded();
-        const clipped = sources.map((source) => source.slice(0, maxChars));
-        // Single-string call is faster than a 1-element batch in transformers.js.
-        const input = clipped.length === 1 ? clipped[0] : clipped;
+        touchModel(RESIDENT_ID);
+        const classifier = this.classifier;
+        // Cap work so a single pass cannot pin huge activations.
+        const budget = Math.min(maxChars, 3000);
+        const clipped = sources.map((source) => source.slice(0, budget));
+        const input = clipped.length === 1 ? clipped[0] : clipped.slice(0, 8);
+        await yieldToUi(0);
         const output = await classifier(input, { aggregation_strategy: "simple" });
         modelOutputs = clipped.length === 1 ? [output] : Array.isArray(output) ? output : [];
+        touchModel(RESIDENT_ID);
       } catch {
         modelFailed = true;
       }
+    } else if (preferModel && this.unavailable && strictFallback) {
+      modelFailed = true;
     }
 
     return sources.map((source, index) => {
       if (!source) return { text: "", spans: [], mode: "empty" };
       if (modelFailed && strictFallback) {
+        const merged = mergeSpans(spansByText[index].filter((span) => redactionPlaceholder(span.kind)));
         return {
-          text: "[REDACTED:TEXT]",
-          spans: [{ start: 0, end: source.length, kind: "TEXT", score: 1 }],
-          mode: "safe fallback · text withheld",
+          text: applySpans(source, merged),
+          spans: merged.map((span) => ({
+            ...span,
+            value: source.slice(span.start, span.end),
+            placeholder: redactionPlaceholder(span.kind),
+          })),
+          mode: "deterministic · model unavailable",
         };
       }
 
@@ -238,7 +323,13 @@ export class TextPrivacyModel {
           value: source.slice(span.start, span.end),
           placeholder: redactionPlaceholder(span.kind),
         })),
-        mode: modelOutputs ? "webgpu + deterministic" : modelFailed ? "safe fallback · deterministic" : "deterministic",
+        mode: modelOutputs
+          ? "webgpu + deterministic"
+          : this.loadingPromise
+            ? "deterministic · ner downloading"
+            : modelFailed
+              ? "deterministic · model unavailable"
+              : "deterministic",
       };
     });
   }
@@ -265,5 +356,5 @@ export class TextPrivacyModel {
 export const textModelInfo = {
   id: MODEL_ID,
   title: "Privacy Filter",
-  runtime: "Transformers.js · WebGPU",
+  runtime: "Transformers.js · WebGPU · Hub download",
 };

@@ -171,19 +171,46 @@ function showPreview(dataUrl) {
 }
 
 function usefulElements(elements = [], limit = 40) {
-  const skippedRoles = new Set(["none", "presentation", "img"]);
-  const ranked = [];
+  const skippedRoles = new Set(["none", "presentation", "img", "banner", "contentinfo"]);
+  const interactive = new Set([
+    "button",
+    "link",
+    "textbox",
+    "heading",
+    "radio",
+    "checkbox",
+    "option",
+    "label",
+    "tab",
+    "menuitem",
+    "listitem",
+    "combobox",
+    "switch",
+    "treeitem",
+  ]);
+
+  const scored = [];
   for (const el of elements) {
     const label = String(el.label || "").trim();
     if (!label || label === "Unlabeled element") continue;
     if (skippedRoles.has(el.role) && el.tag === "svg") continue;
-    ranked.push(el);
+
+    let score = 0;
+    if (interactive.has(el.role)) score += 2;
+    if (["radio", "checkbox", "textbox", "option", "heading", "label"].includes(el.role)) score += 4;
+    if (el.checked != null) score += 2;
+    if (/question|option|answer|submit|next|previous|choice|mcq|assessment|quiz/i.test(label)) score += 4;
+    if (/jump to|skip to|donate|cookie|log in|sign in|bookmark|announcement/i.test(label)) score -= 3;
+    if (el.bounds && Number.isFinite(el.bounds.y)) {
+      // Prefer on-screen / mid-page content over far-off sidebar chrome.
+      if (el.bounds.y >= 0 && el.bounds.y < 900 && el.bounds.x > 120) score += 2;
+      if (el.bounds.x < 80 && el.bounds.width < 360) score -= 2;
+    }
+    scored.push({ el, score });
   }
-  const preferred = ranked.filter((el) =>
-    ["button", "link", "textbox", "heading", "treeitem", "tab", "checkbox", "menuitem"].includes(el.role),
-  );
-  const rest = ranked.filter((el) => !preferred.includes(el));
-  return [...preferred, ...rest].slice(0, limit);
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((item) => item.el);
 }
 
 async function redactPageState(pageState, { maxElements = 80, maxText = 4000, forAgent = false } = {}) {
@@ -197,13 +224,13 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
     return values;
   });
 
-  // Agent path: NER the body once (what the model reads). Labels use deterministic
-  // patterns only — avoids an 80+ string WebGPU batch that dominated Discord scans.
+  // Agent path: use NER only when already ready. Never stall the loop on Hub download.
   let textResult;
   let fieldResults;
   if (forAgent) {
+    const preferNer = textModel.ready;
     const [body] = await textModel.redactBatch([bodyText], {
-      preferModel: true,
+      preferModel: preferNer,
       strictFallback: true,
       maxChars: maxText,
     });
@@ -245,6 +272,14 @@ async function scanPage({ forAgent = false } = {}) {
   const started = Date.now();
   setStatus("busy", "scanning");
   if (!hasExtensionRuntime) throw new Error("Load the built extension in Chrome.");
+
+  // Manual scans can wait for NER; agent path must not hang on first-run download.
+  if (!forAgent && textModel.status !== "ready" && !textModel.unavailable) {
+    setStatus("busy", "loading ner");
+    await textModel.ensureLoaded().catch(() => {});
+  }
+  // Agent: do not start a competing GPU load here — runAgent schedules a delayed warm.
+
   const response = await sendRuntime({ type: "SCAN_PAGE" });
   const pageResponse = unwrapContentResult(response);
   if (!pageResponse.ok) throw new Error(pageResponse.error);
@@ -252,8 +287,8 @@ async function scanPage({ forAgent = false } = {}) {
   if (!pageState) throw new Error("No page state from content script.");
 
   const { textResult, safeElements } = await redactPageState(pageState, {
-    maxElements: forAgent ? 36 : 80,
-    maxText: forAgent ? 1800 : 4000,
+    maxElements: forAgent ? 64 : 100,
+    maxText: forAgent ? 4500 : 6000,
     forAgent,
   });
 
@@ -273,9 +308,19 @@ async function scanPage({ forAgent = false } = {}) {
       detail: {
         url: pageState.url,
         replacedOnPage: pageRedaction?.replaced ?? null,
-        sample: safeElements.slice(0, 6).map(({ ref, role, label }) => ({ ref, role, label })),
-        textPreview: (textResult.text || "").slice(0, 280),
+        sample: safeElements.slice(0, 10).map(({ ref, role, label, tag, value, checked, bounds }) => ({
+          ref,
+          role,
+          tag,
+          label,
+          value,
+          checked,
+          bounds,
+        })),
+        textPreview: (textResult.text || "").slice(0, 400),
+        frames: pageState.frames || 1,
         nerError: textModel.lastError || null,
+        redactMode: textResult.mode || null,
       },
     },
   );
@@ -418,15 +463,19 @@ async function executeAgentTool(name, args = {}) {
       ok: true,
       url: safe.url,
       title: safe.title,
-      elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag }) => ({
+      frames: safe.frames || 1,
+      elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag, checked, bounds }) => ({
         ref,
         role,
         label,
         value,
+        checked,
         sensitive: Boolean(sensitive),
         tag,
+        bounds,
       })),
-      text_preview: (safe.redactedText || "").slice(0, 1200),
+      text: (safe.redactedText || "").slice(0, 4000),
+      text_preview: (safe.redactedText || "").slice(0, 2000),
     };
   }
 
@@ -578,10 +627,12 @@ async function runAgent() {
   try {
     await saveAgentSettings({ apiKey, model, baseUrl });
 
-    // Finish NER warm-up before tools so get_page_state is inference-only.
-    if (textModel.status !== "ready" && !textModel.unavailable) {
-      setStatus("busy", "loading ner");
-      await textModel.ensureLoaded().catch(() => {});
+    // Don't block the agent on a multi-hundred-MB GPU load. Deterministic PII
+    // covers early turns; NER loads only when explicitly needed / idle later.
+    if (textModel.status === "idle" && !textModel.unavailable && !textModel.loadingPromise) {
+      // Deferred so the first model request isn't fighting the agent chat round-trip.
+      setTimeout(() => textModel.ensureLoaded().catch(() => {}), 2500);
+      log("ner", "will warm in background · agent uses deterministic PII until ready");
     }
 
     if (/127\.0\.0\.1|localhost/i.test(baseUrl)) {
@@ -613,16 +664,21 @@ async function runAgent() {
 }
 
 const textModel = new TextPrivacyModel((payload) => {
-  setModelDot(els.nerDot, payload.status);
+  setModelDot(els.nerDot, payload.status === "idle" ? "ready" : payload.status);
   if (payload.status === "loading") {
     setStatus("busy", "loading ner");
     if (!state._nerLoadLogged) {
       state._nerLoadLogged = true;
       log("ner", payload.detail || "loading…");
+    } else if (payload.detail && /%/.test(payload.detail)) {
+      // Throttled progress already — refresh last message lightly via status only.
     }
   } else if (payload.status === "ready") {
     state._nerLoadLogged = false;
-    log("ner", "ready");
+    log("ner", "ready · in RAM (idle unload ~90s)");
+  } else if (payload.status === "idle") {
+    state._nerLoadLogged = false;
+    log("ner", payload.detail || "unloaded");
   } else if (payload.status === "error") {
     state._nerLoadLogged = false;
     log("ner", payload.detail || "fallback", { level: "warn" });
@@ -630,7 +686,7 @@ const textModel = new TextPrivacyModel((payload) => {
 });
 
 const imageModel = new ImagePrivacyModel((payload) => {
-  setModelDot(els.hasDot, payload.status);
+  setModelDot(els.hasDot, payload.status === "idle" ? "ready" : payload.status);
   if (payload.status === "loading") {
     setStatus("busy", "loading has");
     if (!state._hasLoadLogged) {
@@ -639,7 +695,10 @@ const imageModel = new ImagePrivacyModel((payload) => {
     }
   } else if (payload.status === "ready") {
     state._hasLoadLogged = false;
-    log("has", "ready");
+    log("has", "ready · in RAM (auto-unload after screenshot)");
+  } else if (payload.status === "idle") {
+    state._hasLoadLogged = false;
+    log("has", payload.detail || "unloaded");
   } else if (payload.status === "error") {
     state._hasLoadLogged = false;
     log("has", payload.detail || "fallback", { level: "warn" });
@@ -715,9 +774,8 @@ loadAgentSettings()
     }
 
     setStatus(hasExtensionRuntime ? "ready" : "error", hasExtensionRuntime ? "ready" : "no runtime");
-
-    // Warm NER off the critical path so the first get_page_state is not a 30s+ cold load.
-    textModel.ensureLoaded().catch(() => {});
+    // No auto GPU warm on panel open — that is what made Macs lag.
+    // Models load on first use (scan / screenshot / agent warm after delay).
   })
   .catch((error) => {
     log("runtime", error instanceof Error ? error.message : String(error), { level: "error" });

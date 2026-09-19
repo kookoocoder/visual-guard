@@ -16,7 +16,12 @@
     "<all_urls>",
     "https://agentrouter.org/*",
     "http://127.0.0.1:8787/*",
-    "http://localhost:8787/*"
+    "http://localhost:8787/*",
+    "https://huggingface.co/*",
+    "https://*.huggingface.co/*",
+    "https://hf.co/*",
+    "https://*.hf.co/*",
+    "https://cdn.jsdelivr.net/*"
   ],
   "declarative_net_request": {
     "rule_resources": [
@@ -38,7 +43,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "side_panel": {

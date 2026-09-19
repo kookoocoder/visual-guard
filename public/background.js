@@ -15,22 +15,94 @@ async function getActiveTab() {
   return tabs[0] ?? null;
 }
 
+function parseFrameRef(selectorRef) {
+  const raw = String(selectorRef || "");
+  const match = /^f(\d+)_(ref_\d+)$/.exec(raw);
+  if (!match) return { frameId: 0, localRef: raw };
+  return { frameId: Number(match[1]), localRef: match[2] };
+}
+
+async function listFrameIds(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => true,
+    });
+    return results.map((item) => item.frameId).filter((id) => Number.isFinite(id));
+  } catch {
+    return [0];
+  }
+}
+
 async function ensureContentScript(tabId) {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" });
-    return;
+    await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId: 0 });
   } catch {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ["content.js"],
     });
-    await chrome.tabs.sendMessage(tabId, { type: "PING" });
   }
+}
+
+async function sendToFrame(tabId, frameId, message) {
+  return chrome.tabs.sendMessage(tabId, message, { frameId });
 }
 
 async function sendToContent(tabId, message) {
   await ensureContentScript(tabId);
-  return chrome.tabs.sendMessage(tabId, message);
+  return sendToFrame(tabId, 0, message);
+}
+
+async function gatherPageState(tabId) {
+  await ensureContentScript(tabId);
+  const frameIds = await listFrameIds(tabId);
+  const states = [];
+
+  for (const frameId of frameIds) {
+    try {
+      const response = await sendToFrame(tabId, frameId, { type: "GET_PAGE_STATE" });
+      if (!response?.ok || !response.result) continue;
+      const result = response.result;
+      const prefix = `f${frameId}_`;
+      states.push({
+        ...result,
+        frameId,
+        elements: (result.elements || []).map((el) => ({
+          ...el,
+          ref: `${prefix}${el.ref}`,
+        })),
+      });
+    } catch {
+      // Restricted frames (chrome-error, cross-extension, etc.)
+    }
+  }
+
+  if (!states.length) {
+    const fallback = await sendToFrame(tabId, 0, { type: "GET_PAGE_STATE" });
+    return fallback;
+  }
+
+  states.sort((a, b) => (a.frameId === 0 ? -1 : b.frameId === 0 ? 1 : a.frameId - b.frameId));
+  const top = states.find((item) => item.frameId === 0) || states[0];
+  const elements = states.flatMap((item) => item.elements || []);
+  const textForLocalModel = states
+    .map((item) => item.textForLocalModel || "")
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 10000);
+
+  return {
+    ok: true,
+    result: {
+      url: top.url,
+      title: top.title,
+      elements,
+      textForLocalModel,
+      frames: states.length,
+      capturedAt: new Date().toISOString(),
+    },
+  };
 }
 
 async function captureTab(tab) {
@@ -55,29 +127,53 @@ async function executeTool(tool, tab) {
 
   switch (tool.name) {
     case "get_page_state":
-      return sendToContent(tab.id, { type: "GET_PAGE_STATE" });
+      return gatherPageState(tab.id);
     case "read_element":
-      return sendToContent(tab.id, {
-        type: "READ_ELEMENT",
-        selectorRef: tool.selector_ref,
-      });
     case "click":
-      return sendToContent(tab.id, {
-        type: "CLICK",
-        selectorRef: tool.selector_ref,
-      });
-    case "type":
-      return sendToContent(tab.id, {
-        type: "TYPE",
-        selectorRef: tool.selector_ref,
-        text: tool.text ?? "Local test",
-      });
-    case "scroll":
-      return sendToContent(tab.id, {
+    case "type": {
+      await ensureContentScript(tab.id);
+      const { frameId, localRef } = parseFrameRef(tool.selector_ref);
+      const message =
+        tool.name === "read_element"
+          ? { type: "READ_ELEMENT", selectorRef: localRef }
+          : tool.name === "click"
+            ? { type: "CLICK", selectorRef: localRef }
+            : { type: "TYPE", selectorRef: localRef, text: tool.text ?? "Local test" };
+      try {
+        const response = await sendToFrame(tab.id, frameId, message);
+        if (response?.ok && response.result?.ref) {
+          response.result.ref = tool.selector_ref || response.result.ref;
+        }
+        return response;
+      } catch (error) {
+        // Legacy refs without frame prefix — try top frame.
+        if (frameId !== 0) throw error;
+        return sendToFrame(tab.id, 0, message);
+      }
+    }
+    case "scroll": {
+      await ensureContentScript(tab.id);
+      // Prefer the top frame; if that barely moves, also nudge child frames.
+      const primary = await sendToFrame(tab.id, 0, {
         type: "SCROLL",
         direction: tool.direction === "up" ? "up" : "down",
         amountPx: Number(tool.amount_px) || 320,
       });
+      const frameIds = await listFrameIds(tab.id);
+      for (const frameId of frameIds) {
+        if (frameId === 0) continue;
+        try {
+          await sendToFrame(tab.id, frameId, {
+            type: "SCROLL",
+            direction: tool.direction === "up" ? "up" : "down",
+            amountPx: Number(tool.amount_px) || 320,
+          });
+        } catch {
+          // ignore locked frames
+        }
+      }
+      return primary;
+    }
     case "navigate": {
       const url = new URL(tool.url);
       if (!/^https?:$/.test(url.protocol)) {
@@ -192,7 +288,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
 
       if (message.type === "SCAN_PAGE") {
-        sendResponse({ ok: true, result: await sendToContent(tab.id, { type: "GET_PAGE_STATE" }) });
+        sendResponse({ ok: true, result: await gatherPageState(tab.id) });
         return;
       }
 
