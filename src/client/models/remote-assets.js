@@ -4,6 +4,10 @@
  */
 
 const CACHE_NAME = "visual-guard-models-v1";
+// Cache Storage rejects chrome-extension:// requests. Cache entries do not
+// need to share the downloaded resource's origin, so use a stable HTTPS
+// namespace and keep the actual Hugging Face URL in download metadata.
+const CACHE_KEY_BASE = "https://visual-guard-cache.invalid/";
 
 /** Official OpenAI Privacy Filter (transformers.js loads these by model id). */
 export const NER_MODEL_ID = "openai/privacy-filter";
@@ -35,13 +39,19 @@ async function openCache() {
   return caches.open(CACHE_NAME);
 }
 
+function cacheRequest(cacheKey) {
+  return new Request(new URL(String(cacheKey).replace(/^\/+/, ""), CACHE_KEY_BASE), {
+    method: "GET",
+  });
+}
+
 /**
  * Streaming download with progress callbacks and UI yields so the side panel
  * stays responsive while pulling hundreds of MB.
  */
 export async function downloadToCache(url, cacheKey, { onProgress } = {}) {
   const cache = await openCache();
-  const request = new Request(cacheKey, { method: "GET" });
+  const request = cacheRequest(cacheKey);
   const hit = await cache.match(request);
   if (hit) {
     onProgress?.({ status: "cached", loaded: 1, total: 1, pct: 100, url, cacheKey });
@@ -101,7 +111,7 @@ export async function downloadToCache(url, cacheKey, { onProgress } = {}) {
 
 export async function getCachedArrayBuffer(cacheKey) {
   const cache = await openCache();
-  const hit = await cache.match(new Request(cacheKey));
+  const hit = await cache.match(cacheRequest(cacheKey));
   if (!hit) return null;
   return hit.arrayBuffer();
 }

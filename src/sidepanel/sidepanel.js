@@ -28,11 +28,27 @@ const els = {
 
 const state = {
   pageState: null,
+  agentHistory: [],
   busy: false,
   logLines: [],
   _nerLoadLogged: false,
   _hasLoadLogged: false,
 };
+
+const AGENT_HISTORY_KEY = "visualGuardAgentHistory";
+
+async function loadAgentHistory() {
+  if (!hasExtensionRuntime || !chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get(AGENT_HISTORY_KEY);
+  if (Array.isArray(stored?.[AGENT_HISTORY_KEY])) {
+    state.agentHistory = stored[AGENT_HISTORY_KEY];
+  }
+}
+
+async function saveAgentHistory() {
+  if (!hasExtensionRuntime || !chrome.storage?.session) return;
+  await chrome.storage.session.set({ [AGENT_HISTORY_KEY]: state.agentHistory });
+}
 
 function sendRuntime(message) {
   if (!hasExtensionRuntime) {
@@ -213,7 +229,7 @@ function usefulElements(elements = [], limit = 40) {
   return scored.slice(0, limit).map((item) => item.el);
 }
 
-async function redactPageState(pageState, { maxElements = 80, maxText = 4000, forAgent = false } = {}) {
+async function redactPageState(pageState, { maxElements = 80, maxText = 4000, forAgent = false, tabId = null } = {}) {
   const elements = usefulElements(pageState.elements || [], maxElements);
   const bodyText = String(pageState.textForLocalModel || "").slice(0, maxText);
   const fieldTexts = elements.flatMap((element) => {
@@ -261,6 +277,7 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
 
   state.pageState = {
     ...pageState,
+    tabId,
     textForLocalModel: undefined,
     elements: safeElements,
     redactedText: textResult.text,
@@ -268,7 +285,7 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
   return { textResult, safeElements };
 }
 
-async function scanPage({ forAgent = false } = {}) {
+async function scanPage({ forAgent = false, tabId = null } = {}) {
   const started = Date.now();
   setStatus("busy", "scanning");
   if (!hasExtensionRuntime) throw new Error("Load the built extension in Chrome.");
@@ -280,7 +297,7 @@ async function scanPage({ forAgent = false } = {}) {
   }
   // Agent: do not start a competing GPU load here — runAgent schedules a delayed warm.
 
-  const response = await sendRuntime({ type: "SCAN_PAGE" });
+  const response = await sendRuntime({ type: "SCAN_PAGE", tabId });
   const pageResponse = unwrapContentResult(response);
   if (!pageResponse.ok) throw new Error(pageResponse.error);
   const pageState = pageResponse.result;
@@ -290,6 +307,7 @@ async function scanPage({ forAgent = false } = {}) {
     maxElements: forAgent ? 64 : 100,
     maxText: forAgent ? 4500 : 6000,
     forAgent,
+    tabId,
   });
 
   // Applying redacted text into Discord's live DOM is expensive and not needed for the agent.
@@ -375,7 +393,7 @@ async function redactToolResult(value) {
     Object.entries(value)
       .filter(([key]) => !/raw|textForLocalModel/i.test(key))
       .map(async ([key, item]) => {
-        if (typeof item === "string" && /label|value|text/i.test(key)) {
+        if (typeof item === "string" && /label|value|text|title|url/i.test(key)) {
           // Deterministic only — page body already went through NER; avoid extra WebGPU passes.
           const redacted = await textModel.redact(item, { preferModel: false, strictFallback: true });
           return [key, redacted.text];
@@ -456,13 +474,25 @@ async function executeAgentTool(name, args = {}) {
     throw new Error("Load the built extension in Chrome to run the agent.");
   }
 
-  if (name === "get_page_state") {
-    await scanPage({ forAgent: true });
-    const safe = state.pageState;
+  if (name === "list_tabs") {
+    const response = await sendRuntime({ type: "GET_TABS" });
+    if (!response?.ok) throw new Error(response?.error || "Unable to list browser tabs.");
     return {
       ok: true,
-      url: safe.url,
-      title: safe.title,
+      tabs: await redactToolResult(response.tabs || []),
+    };
+  }
+
+  if (name === "get_page_state") {
+    const tabId = Number.isInteger(args.tab_id) ? args.tab_id : null;
+    await scanPage({ forAgent: true, tabId });
+    const safe = state.pageState;
+    const metadata = await redactToolResult({ url: safe.url, title: safe.title });
+    return {
+      ok: true,
+      tab_id: safe.tabId,
+      url: metadata.url,
+      title: metadata.title,
       frames: safe.frames || 1,
       elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag, checked, bounds }) => ({
         ref,
@@ -648,12 +678,15 @@ async function runAgent() {
 
     const result = await runAgentLoop({
       task,
+      history: state.agentHistory,
       apiKey,
       baseUrl,
       model,
       executeTool: executeAgentTool,
       onEvent: handleAgentEvent,
     });
+    state.agentHistory = result.messages.slice(1);
+    await saveAgentHistory().catch(() => {});
     setStatus(result.ok ? "ready" : "error", result.ok ? "ready" : "truncated");
   } catch (error) {
     log("agent", error instanceof Error ? error.message : String(error), { level: "error" });
@@ -746,8 +779,8 @@ els.copyLog.addEventListener("click", copyLog);
 els.clearLog.addEventListener("click", clearLog);
 
 clearLog();
-loadAgentSettings()
-  .then(async (settings) => {
+Promise.all([loadAgentSettings(), loadAgentHistory()])
+  .then(async ([settings]) => {
     let baseUrl = settings.baseUrl || AGENT_CONFIG.baseUrl;
     if (/agentrouter\.org/i.test(baseUrl)) {
       baseUrl = AGENT_CONFIG.baseUrl;

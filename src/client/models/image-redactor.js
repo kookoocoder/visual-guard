@@ -391,6 +391,16 @@ export class ImagePrivacyModel {
     const image = await loadImage(dataUrl);
     try {
       const { detections } = await this.infer(dataUrl);
+      if (!detections.length) {
+        this.scheduleUnload(12_000);
+        return {
+          dataUrl: safeFallbackFrame(image),
+          detections: [],
+          mode: "safe fallback · frame withheld",
+          elapsedMs: Math.round(performance.now() - started),
+          error: "Visual model returned no verified privacy masks; raw frame withheld.",
+        };
+      }
       const redactedUrl = drawRedactedFrame(image, detections, { label: "MODEL MASK" });
       // Drop raster masks from the return payload (they are huge TypedArrays).
       const lightDetections = detections.map(({ mask, ...rest }) => rest);

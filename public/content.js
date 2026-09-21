@@ -159,7 +159,12 @@
 
   function serializeElement(element) {
     const kind = sensitiveKind(element);
-    const value = "value" in element ? String(element.value ?? "") : "";
+    const value =
+      "value" in element
+        ? String(element.value ?? "")
+        : element.isContentEditable || element.getAttribute("role") === "textbox"
+          ? String(element.innerText || element.textContent || "")
+          : "";
     const bounds = absoluteBounds(element);
     const checked =
       element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
@@ -488,7 +493,6 @@
     firePointer(target, "mouseover");
     firePointer(target, "mousedown");
     firePointer(target, "mouseup");
-    firePointer(target, "click");
     target.click?.();
 
     if (target instanceof HTMLInputElement && (target.type === "checkbox" || target.type === "radio") && !target.checked) {
@@ -531,6 +535,93 @@
       dispatchInput(element, text);
     }
     return { action: "type", ref: selectorRef, text, label: getLabel(element) || "element" };
+  }
+
+  function pressKey(selectorRef, key) {
+    const element = resolve(selectorRef);
+    const allowed = new Set(["Enter", "Escape", "Tab"]);
+    if (!allowed.has(key)) throw new Error(`Unsupported key: ${key}`);
+
+    try {
+      element.focus({ preventScroll: true });
+    } catch {
+      element.focus?.();
+    }
+
+    const keyCode = key === "Enter" ? 13 : key === "Escape" ? 27 : 9;
+    const options = {
+      key,
+      code: key === "Enter" ? "Enter" : key,
+      keyCode,
+      which: keyCode,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    };
+    const accepted = element.dispatchEvent(new KeyboardEvent("keydown", options));
+    element.dispatchEvent(new KeyboardEvent("keypress", options));
+    element.dispatchEvent(new KeyboardEvent("keyup", options));
+
+    return {
+      action: "press_key",
+      ref: selectorRef,
+      key,
+      handledByPage: !accepted,
+      label: getLabel(element) || "element",
+    };
+  }
+
+  function submitElement(selectorRef) {
+    const composer = resolve(selectorRef);
+    const form = composer.closest("form");
+    const icon = document.querySelector('span[data-icon="send"], [data-testid="send"]');
+    const target =
+      form?.querySelector('button[type="submit"], input[type="submit"]') ||
+      document.querySelector(
+        'button[aria-label="Send"], [role="button"][aria-label="Send"], button[data-testid="send"]',
+      ) ||
+      icon?.closest('button, [role="button"]');
+
+    if (!target || !isVisible(target)) {
+      throw new Error("No visible Send/Submit control is available for this composer.");
+    }
+
+    target.scrollIntoView({ block: "center", inline: "nearest" });
+    firePointer(target, "mouseover");
+    firePointer(target, "mousedown");
+    firePointer(target, "mouseup");
+    firePointer(target, "click");
+    target.click?.();
+
+    return {
+      action: "submit",
+      ref: selectorRef,
+      method: "send_control",
+      controlLabel: getLabel(target) || target.getAttribute("data-testid") || "Send",
+    };
+  }
+
+  function focusElement(selectorRef) {
+    const element = resolve(selectorRef);
+    element.scrollIntoView({ block: "center", inline: "nearest" });
+    try {
+      element.focus({ preventScroll: true });
+    } catch {
+      element.focus?.();
+    }
+    const serialized = serializeElement(element);
+    const fullValue =
+      "value" in element
+        ? String(element.value ?? "")
+        : element.isContentEditable || element.getAttribute("role") === "textbox"
+          ? String(element.innerText || element.textContent || "")
+          : "";
+    return {
+      action: "focus",
+      ref: selectorRef,
+      label: serialized.label,
+      value: serialized.sensitive ? "" : fullValue.slice(0, 12_000),
+    };
   }
 
   function findScrollable(from = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2)) {
@@ -591,6 +682,15 @@
           break;
         case "TYPE":
           sendResponse({ ok: true, result: typeElement(message.selectorRef, message.text || "Local test") });
+          break;
+        case "PRESS_KEY":
+          sendResponse({ ok: true, result: pressKey(message.selectorRef, message.key) });
+          break;
+        case "SUBMIT":
+          sendResponse({ ok: true, result: submitElement(message.selectorRef) });
+          break;
+        case "FOCUS":
+          sendResponse({ ok: true, result: focusElement(message.selectorRef) });
           break;
         case "SCROLL":
           sendResponse({

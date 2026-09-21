@@ -9,12 +9,41 @@ function summarizeForLog(value, max = 240) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+function compactOlderToolResults(messages, keepLatest = 6) {
+  const indexes = messages
+    .map((message, index) => (message.role === "tool" ? index : -1))
+    .filter((index) => index >= 0);
+
+  for (const index of indexes.slice(0, -keepLatest)) {
+    const message = messages[index];
+    if (typeof message.content !== "string" || message.content.length < 800) continue;
+
+    let summary = { ok: true, compacted: true, note: "Older tool payload omitted. Re-read the tab if needed." };
+    try {
+      const parsed = JSON.parse(message.content);
+      summary = {
+        ok: parsed?.ok !== false,
+        compacted: true,
+        action: parsed?.action,
+        tab_id: parsed?.tab_id,
+        title: parsed?.title,
+        error: parsed?.error,
+        note: "Older tool payload omitted. Re-read the tab if needed.",
+      };
+    } catch {
+      // Keep the generic compacted marker for non-JSON tool output.
+    }
+    message.content = JSON.stringify(summary);
+  }
+}
+
 /**
  * Run an OpenAI-compatible tool-calling loop against AgentRouter.
  * `executeTool(name, args)` must return a JSON-serializable, already-redacted result.
  */
 export async function runAgentLoop({
   task,
+  history = [],
   apiKey,
   baseUrl = AGENT_CONFIG.baseUrl,
   model = AGENT_CONFIG.model,
@@ -30,6 +59,7 @@ export async function runAgentLoop({
   const tools = buildOpenAiTools();
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
+    ...history.filter((message) => message?.role && message.role !== "system"),
     { role: "user", content: task.trim() },
   ];
 
@@ -43,6 +73,7 @@ export async function runAgentLoop({
   for (let turn = 1; turn <= maxTurns; turn += 1) {
     if (signal?.aborted) throw new Error("Agent run cancelled.");
 
+    compactOlderToolResults(messages);
     const turnStarted = Date.now();
     onEvent({ type: "model_request", turn, model: activeModel });
 

@@ -1,10 +1,16 @@
 import { TOOL_DEFINITIONS } from "../shared/tool-contract.js";
 
 const PARAMETER_SCHEMAS = {
+  list_tabs: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
   get_page_state: {
     type: "object",
     properties: {
       reason: { type: "string", description: "Brief why you need page state." },
+      tab_id: { type: "integer", description: "Optional tab ID returned by list_tabs. Defaults to the active tab." },
     },
     required: [],
   },
@@ -12,6 +18,7 @@ const PARAMETER_SCHEMAS = {
     type: "object",
     properties: {
       selector_ref: { type: "string", description: "Stable element ref, e.g. ref_1." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
     },
     required: ["selector_ref"],
   },
@@ -19,6 +26,7 @@ const PARAMETER_SCHEMAS = {
     type: "object",
     properties: {
       selector_ref: { type: "string", description: "Stable element ref to click." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
     },
     required: ["selector_ref"],
   },
@@ -27,14 +35,33 @@ const PARAMETER_SCHEMAS = {
     properties: {
       selector_ref: { type: "string", description: "Stable element ref to type into." },
       text: { type: "string", description: "Text to type. Never include secrets the user did not provide." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
     },
     required: ["selector_ref", "text"],
+  },
+  press_key: {
+    type: "object",
+    properties: {
+      selector_ref: { type: "string", description: "Stable ref of the element that should receive the key." },
+      key: { type: "string", enum: ["Enter", "Escape", "Tab"], description: "Keyboard key to press." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
+    },
+    required: ["selector_ref", "key"],
+  },
+  submit: {
+    type: "object",
+    properties: {
+      selector_ref: { type: "string", description: "Stable ref of the populated form or chat composer." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
+    },
+    required: ["selector_ref"],
   },
   scroll: {
     type: "object",
     properties: {
       direction: { type: "string", enum: ["up", "down"], description: "Scroll direction." },
       amount_px: { type: "integer", description: "Pixels to scroll.", minimum: 1 },
+      tab_id: { type: "integer", description: "Optional target tab ID." },
     },
     required: ["direction"],
   },
@@ -42,6 +69,7 @@ const PARAMETER_SCHEMAS = {
     type: "object",
     properties: {
       url: { type: "string", description: "Absolute http(s) URL." },
+      tab_id: { type: "integer", description: "Optional target tab ID. Defaults to the active tab." },
     },
     required: ["url"],
   },
