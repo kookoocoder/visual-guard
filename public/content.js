@@ -458,21 +458,40 @@
       button: 0,
       buttons: type === "mouseup" || type === "click" ? 0 : 1,
     };
-    try {
-      if (typeof PointerEvent === "function") {
-        element.dispatchEvent(
-          new PointerEvent(type.replace("mouse", "pointer"), {
-            ...opts,
-            pointerId: 1,
-            pointerType: "mouse",
-            isPrimary: true,
-          }),
-        );
+    if (type !== "click") {
+      try {
+        if (typeof PointerEvent === "function") {
+          element.dispatchEvent(
+            new PointerEvent(type.replace("mouse", "pointer"), {
+              ...opts,
+              pointerId: 1,
+              pointerType: "mouse",
+              isPrimary: true,
+            }),
+          );
+        }
+      } catch {
+        // Older pages / restricted nodes may reject PointerEvent.
       }
-    } catch {
-      // Older pages / restricted nodes may reject PointerEvent.
     }
     element.dispatchEvent(new MouseEvent(type, opts));
+  }
+
+  function isSendControl(element) {
+    const hint = [
+      getLabel(element),
+      element.getAttribute?.("aria-label"),
+      element.getAttribute?.("data-testid"),
+      element.getAttribute?.("data-icon"),
+      element.getAttribute?.("type"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return /send|submit/i.test(hint);
+  }
+
+  function activateOnce(element) {
+    element.click?.();
   }
 
   function clickElement(selectorRef) {
@@ -490,10 +509,14 @@
       target.focus?.();
     }
 
-    firePointer(target, "mouseover");
-    firePointer(target, "mousedown");
-    firePointer(target, "mouseup");
-    target.click?.();
+    if (isSendControl(target)) {
+      activateOnce(target);
+    } else {
+      firePointer(target, "mouseover");
+      firePointer(target, "mousedown");
+      firePointer(target, "mouseup");
+      activateOnce(target);
+    }
 
     if (target instanceof HTMLInputElement && (target.type === "checkbox" || target.type === "radio") && !target.checked) {
       target.checked = true;
@@ -552,14 +575,15 @@
       element.focus();
     }
 
+    const wanted = String(text ?? "");
+    const current = fieldText(element);
+    if (current === wanted || isExactRepeat(current, wanted)) {
+      if (current !== wanted) replaceField(element, wanted);
+      return;
+    }
+
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-      try {
-        element.select();
-      } catch {
-        // Some input types cannot select.
-      }
-      const inserted = Boolean(doc.execCommand?.("insertText", false, text)) && element.value === text;
-      if (!inserted) dispatchInput(element, text);
+      dispatchInput(element, wanted);
       return;
     }
 
@@ -570,12 +594,37 @@
       selection.removeAllRanges();
       selection.addRange(range);
     }
-    if (!doc.execCommand?.("insertText", false, text)) {
-      element.textContent = text;
-      element.dispatchEvent(
-        new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }),
-      );
+    doc.execCommand?.("delete", false, null);
+    if (!doc.execCommand?.("insertText", false, wanted)) {
+      replaceField(element, wanted);
+      return;
     }
+    if (isExactRepeat(fieldText(element), wanted)) replaceField(element, wanted);
+  }
+
+  function fieldText(element) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return String(element.value ?? "");
+    }
+    return String(element.innerText || element.textContent || "");
+  }
+
+  function isExactRepeat(current, text) {
+    const piece = String(text ?? "").replace(/\s+/g, "");
+    const value = String(current ?? "").replace(/\s+/g, "");
+    if (!piece || value.length < piece.length * 2 || value.length % piece.length !== 0) return false;
+    return value === piece.repeat(value.length / piece.length);
+  }
+
+  function replaceField(element, text) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      dispatchInput(element, text);
+      return;
+    }
+    element.textContent = text;
+    element.dispatchEvent(
+      new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }),
+    );
   }
 
   function pressKey(selectorRef, key) {
@@ -628,11 +677,12 @@
     }
 
     target.scrollIntoView({ block: "center", inline: "nearest" });
-    firePointer(target, "mouseover");
-    firePointer(target, "mousedown");
-    firePointer(target, "mouseup");
-    firePointer(target, "click");
-    target.click?.();
+    try {
+      target.focus({ preventScroll: true });
+    } catch {
+      target.focus?.();
+    }
+    activateOnce(target);
 
     return {
       action: "submit",
