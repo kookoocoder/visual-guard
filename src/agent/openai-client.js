@@ -91,7 +91,7 @@ export class AgentRouterClient {
 function formatUpstreamError(proxied) {
   const status = proxied?.status;
   const message = proxied?.error || "AgentRouter request failed.";
-  if (status === 405 || /non-JSON|waf|doctype|<!html/i.test(message)) {
+  if (status === 405 || /non-JSON|doctype|<!html/i.test(message)) {
     return formatWafHtmlError(status, "configured base URL");
   }
   if (/Failed to fetch|NetworkError|CONNECTION_REFUSED|ERR_CONNECTION/i.test(message)) {

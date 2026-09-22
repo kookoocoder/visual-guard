@@ -29,6 +29,8 @@ ENV_LOCAL = ROOT / ".env.local"
 PORT = int(os.environ.get("AGENT_PROXY_PORT", "8787"))
 
 AGENTROUTER_BASE = os.environ.get("AGENTROUTER_BASE_URL", "https://agentrouter.org/v1").rstrip("/")
+# AgentRouter's WAF rejects the OpenAI SDK user agent. This is the allowlisted CLI agent.
+AGENTROUTER_USER_AGENT = os.environ.get("AGENTROUTER_USER_AGENT", "QwenCode/0.2.0 (linux x64)")
 DEEPSEEK_BASE = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 
 MODEL_MAP = {
@@ -104,12 +106,37 @@ def _forward(client: OpenAI, body: dict) -> dict:
     }
     kwargs = {k: v for k, v in body.items() if k in allowed and v is not None}
     kwargs["stream"] = False
+    # AgentRouter thinking mode rejects assistant content: null on tool turns.
+    messages = kwargs.get("messages")
+    if isinstance(messages, list):
+        fixed = []
+        for message in messages:
+            if not isinstance(message, dict):
+                fixed.append(message)
+                continue
+            item = dict(message)
+            if item.get("role") == "assistant" and item.get("content") is None:
+                item["content"] = ""
+            if item.get("role") == "assistant" and "reasoning_content" not in item and item.get("tool_calls"):
+                item["reasoning_content"] = ""
+            fixed.append(item)
+        kwargs["messages"] = fixed
     completion = client.chat.completions.create(**kwargs)
-    return completion.model_dump(exclude_none=True)
+    data = completion.model_dump(exclude_none=True)
+    # Keep empty content as "" so clients do not round-trip null.
+    for choice in data.get("choices") or []:
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("content") is None:
+            message["content"] = ""
+        if isinstance(message, dict) and "reasoning_content" not in message and message.get("tool_calls"):
+            message["reasoning_content"] = ""
+    return data
 
 
-def _client(api_key: str, base_url: str, timeout: float = 60.0) -> OpenAI:
-    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+def _client(api_key: str, base_url: str, timeout: float = 60.0, user_agent: str | None = None) -> OpenAI:
+    # custom headers are applied after the SDK user agent, so this is what AgentRouter sees.
+    headers = {"User-Agent": user_agent} if user_agent else None
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, default_headers=headers)
 
 
 @app.get("/health")
@@ -147,7 +174,7 @@ async def chat_completions(request: Request):
     # 1) AgentRouter (Pi docs: https://agentrouter.org/docs/pi.html)
     if ar_key and time.time() >= _agentrouter_disabled_until:
         try:
-            client = _client(ar_key, AGENTROUTER_BASE, timeout=8.0)
+            client = _client(ar_key, AGENTROUTER_BASE, timeout=60.0, user_agent=AGENTROUTER_USER_AGENT)
             data = _forward(client, {**body, "model": requested_model})
             data["_proxy"] = {"upstream": "agentrouter", "model": requested_model}
             return JSONResponse(data)

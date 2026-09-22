@@ -478,9 +478,11 @@
           const details = el("details", "tool");
           details.dataset.state = "running";
           const summary = el("summary", "tool__head");
+          const chev = icon(ICON.chev);
+          chev.classList.add("tool__chev");
           const name = el("span", "tool__name", spec.name);
           const meta = el("span", "tool__meta", "running");
-          summary.append(el("i", "tool__state"), name, meta);
+          summary.append(el("i", "tool__state"), name, meta, chev);
           const body = el("div", "tool__body");
           const inputLabel = el("div", "tool__label", "Input");
           const inputPre = el("pre", "tool__io", spec.input == null ? "—" : String(spec.input));
@@ -491,13 +493,38 @@
           toBottom(stick);
           const started = Date.now();
           return {
-            result(output, state) {
+            result(output, state, extras = {}) {
               details.dataset.state = state || "done";
-              meta.textContent =
-                (state === "error" ? "failed" : "done") + " · " + (Date.now() - started) + " ms";
+              const status = state === "error" ? "failed" : "done";
+              const ms = Date.now() - started;
+              meta.textContent = extras.previewUrl
+                ? `${status} · ${ms} ms · click to preview`
+                : `${status} · ${ms} ms`;
               const outLabel = el("div", "tool__label", "Result");
               const outPre = el("pre", "tool__io", output == null ? "—" : String(output));
               body.append(outLabel, outPre);
+
+              if (extras.previewUrl) {
+                details.dataset.hasPreview = "true";
+                details.open = true;
+                const previewLabel = el("div", "tool__label", "Screenshot");
+                const figure = el("figure", "tool__preview");
+                const img = document.createElement("img");
+                img.className = "tool__preview-img";
+                img.src = extras.previewUrl;
+                img.alt = extras.previewAlt || "Redacted screenshot";
+                img.loading = "lazy";
+                img.addEventListener("click", (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  figure.classList.toggle("is-zoomed");
+                });
+                figure.append(img);
+                if (extras.previewCaption) {
+                  figure.append(el("figcaption", "tool__preview-cap", extras.previewCaption));
+                }
+                body.append(previewLabel, figure);
+              }
               toBottom();
             },
           };
@@ -726,6 +753,21 @@
         if (empty) empty.hidden = false;
         pinned = true;
         syncJump();
+      },
+      loadTranscript(items) {
+        this.clear();
+        const list = Array.isArray(items) ? items : [];
+        list.forEach((message) => {
+          if (message?.role === "user") {
+            addUser(message.text || "");
+            return;
+          }
+          const agent = beginAgent();
+          if (message?.text) agent.text(message.text);
+          agent.done();
+        });
+        if (!list.length && empty) empty.hidden = false;
+        toBottom(true);
       },
     };
   }

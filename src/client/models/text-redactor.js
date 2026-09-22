@@ -71,8 +71,12 @@ export function redactionPlaceholder(kind) {
 
 const deterministicPatterns = [
   { kind: "EMAIL", regex: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
+  // Aadhaar / UIDAI 12-digit IDs (spaces or dashes between quartets).
+  { kind: "ID", regex: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g },
   { kind: "CARD", regex: /\b(?:\d[ -]?){13,19}\b/g },
   { kind: "PHONE", regex: /(?<!\w)(?:\+?\d[\d .()\-]{7,}\d)(?!\w)/g },
+  // DOB-style dates common on IDs (DD/MM/YYYY, DD-MM-YY, …).
+  { kind: "DATE", regex: /\b\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}\b/g },
   { kind: "SECRET", regex: /\b(?:sk|pk|api)[_-][A-Za-z0-9_-]{12,}\b/g },
 ];
 
@@ -112,6 +116,72 @@ function applySpans(text, spans) {
     }, text);
 }
 
+/** Extract reusable surface forms (e.g. "yashraj") from NER/deterministic spans. */
+export function collectKnownTokens(spans = []) {
+  const tokens = [];
+  const seen = new Set();
+  for (const span of spans) {
+    const kind = String(span.kind || "").toUpperCase();
+    if (!redactionPlaceholder(kind)) continue;
+    const raw = String(span.value ?? "").trim();
+    if (!raw || raw.length < 2 || raw.length > 64) continue;
+    // Prefer the stem without possessive so "yashraj's" seeds "yashraj".
+    const stem = raw.replace(/['’]s\b/i, "").replace(/['’]$/u, "").trim();
+    for (const value of [raw, stem]) {
+      if (!value || value.length < 2) continue;
+      const key = `${kind}:${value.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tokens.push({ value, kind });
+    }
+  }
+  return tokens;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Match known PII tokens including possessives: yashraj / yashraj's / Yashraj. */
+export function knownTokenSpans(text, tokens = []) {
+  if (!text || !tokens.length) return [];
+  const spans = [];
+  for (const token of tokens) {
+    const kind = String(token.kind || "").toUpperCase();
+    if (!redactionPlaceholder(kind)) continue;
+    const value = String(token.value || "").trim();
+    if (!value || value.length < 2) continue;
+    const pattern = new RegExp(
+      `(?<![\\p{L}\\p{N}_])${escapeRegExp(value)}(?:['’]s)?(?![\\p{L}\\p{N}_])`,
+      "giu",
+    );
+    for (const match of text.matchAll(pattern)) {
+      spans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        kind,
+        score: 1,
+        value: match[0],
+      });
+    }
+  }
+  return spans;
+}
+
+export function applyKnownTokens(text, tokens = []) {
+  const source = String(text ?? "");
+  if (!source || !tokens.length) return { text: source, spans: [] };
+  const merged = mergeSpans(knownTokenSpans(source, tokens));
+  return {
+    text: applySpans(source, merged),
+    spans: merged.map((span) => ({
+      ...span,
+      value: source.slice(span.start, span.end),
+      placeholder: redactionPlaceholder(span.kind),
+    })),
+  };
+}
+
 function deterministicSpans(text) {
   return deterministicPatterns.flatMap(({ kind, regex }) => {
     const spans = [];
@@ -143,7 +213,7 @@ function normalizeModelOutput(output, text) {
     .filter((span) => {
       if (!(span.end > span.start) || span.start < 0) return false;
       const length = span.end - span.start;
-      if (length > maxSpan && !["EMAIL", "PHONE", "CARD", "PASSWORD", "SECRET"].includes(span.kind)) {
+      if (length > maxSpan && !["EMAIL", "PHONE", "CARD", "PASSWORD", "SECRET", "ID", "DATE", "NAME"].includes(span.kind)) {
         return false;
       }
       return true;
@@ -270,9 +340,15 @@ export class TextPrivacyModel {
     return (await this.redactBatch([text], options))[0];
   }
 
-  async redactBatch(texts = [], { preferModel = true, strictFallback = false, maxChars = MAX_MODEL_CHARS } = {}) {
+  async redactBatch(
+    texts = [],
+    { preferModel = true, strictFallback = false, maxChars = MAX_MODEL_CHARS, knownTokens = [] } = {},
+  ) {
     const sources = texts.map((text) => String(text ?? ""));
-    const spansByText = sources.map(deterministicSpans);
+    const spansByText = sources.map((source) => [
+      ...deterministicSpans(source),
+      ...knownTokenSpans(source, knownTokens),
+    ]);
     let modelOutputs = null;
     let modelFailed = false;
 
@@ -285,10 +361,20 @@ export class TextPrivacyModel {
         // Cap work so a single pass cannot pin huge activations.
         const budget = Math.min(maxChars, 3000);
         const clipped = sources.map((source) => source.slice(0, budget));
-        const input = clipped.length === 1 ? clipped[0] : clipped.slice(0, 8);
-        await yieldToUi(0);
-        const output = await classifier(input, { aggregation_strategy: "simple" });
-        modelOutputs = clipped.length === 1 ? [output] : Array.isArray(output) ? output : [];
+        const chunkSize = 8;
+        modelOutputs = new Array(clipped.length).fill(null);
+        for (let offset = 0; offset < clipped.length; offset += chunkSize) {
+          const slice = clipped.slice(offset, offset + chunkSize);
+          // Skip empty chunks to avoid wasting GPU on blank labels.
+          if (!slice.some(Boolean)) continue;
+          await yieldToUi(0);
+          const input = slice.length === 1 ? slice[0] : slice;
+          const output = await classifier(input, { aggregation_strategy: "simple" });
+          const outputs = slice.length === 1 ? [output] : Array.isArray(output) ? output : [];
+          for (let i = 0; i < outputs.length; i += 1) {
+            modelOutputs[offset + i] = outputs[i];
+          }
+        }
         touchModel(RESIDENT_ID);
       } catch {
         modelFailed = true;
@@ -325,11 +411,13 @@ export class TextPrivacyModel {
         })),
         mode: modelOutputs
           ? "webgpu + deterministic"
-          : this.loadingPromise
-            ? "deterministic · ner downloading"
-            : modelFailed
-              ? "deterministic · model unavailable"
-              : "deterministic",
+          : knownTokens.length
+            ? "deterministic + known tokens"
+            : this.loadingPromise
+              ? "deterministic · ner downloading"
+              : modelFailed
+                ? "deterministic · model unavailable"
+                : "deterministic",
       };
     });
   }

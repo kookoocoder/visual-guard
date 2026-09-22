@@ -38,6 +38,72 @@ function compactOlderToolResults(messages, keepLatest = 6) {
 }
 
 /**
+ * DeepSeek / AgentRouter thinking mode requires every assistant message to carry
+ * reasoning_content once tools are in the request — including empty strings.
+ * `content` must be a string (or content blocks), never null.
+ * See https://api-docs.deepseek.com/guides/thinking_mode/
+ */
+function normalizeAssistantMessage(message) {
+  if (!message || message.role !== "assistant") return message;
+
+  let content = message.content;
+  if (content == null) content = "";
+  else if (typeof content === "string") content = content;
+  else if (!Array.isArray(content)) content = String(content);
+
+  const next = {
+    role: "assistant",
+    content,
+  };
+
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
+    next.tool_calls = message.tool_calls;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(message, "reasoning_content")) {
+    next.reasoning_content = message.reasoning_content ?? "";
+  } else if (next.tool_calls) {
+    next.reasoning_content = "";
+  }
+
+  if (message.reasoning != null) next.reasoning = message.reasoning;
+  return next;
+}
+
+function ensureThinkingFields(messages, { withTools = false } = {}) {
+  return messages.map((message) => {
+    if (message?.role !== "assistant") return message;
+    const next = normalizeAssistantMessage(message);
+    if (withTools && !Object.prototype.hasOwnProperty.call(next, "reasoning_content")) {
+      next.reasoning_content = "";
+    }
+    if (next.content == null) next.content = "";
+    return next;
+  });
+}
+
+function extractMessageText(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (!part || typeof part !== "object") return "";
+        if (typeof part.text === "string") return part.text;
+        if (typeof part.content === "string") return part.content;
+        return "";
+      })
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+const EMPTY_CONTINUE_PROMPT =
+  "Continue the user task. Call the next needed tool now. Do not stop with empty text.";
+
+/**
  * Run an OpenAI-compatible tool-calling loop against AgentRouter.
  * `executeTool(name, args)` must return a JSON-serializable, already-redacted result.
  */
@@ -59,13 +125,18 @@ export async function runAgentLoop({
   const tools = buildOpenAiTools();
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
-    ...history.filter((message) => message?.role && message.role !== "system"),
+    ...ensureThinkingFields(
+      history.filter((message) => message?.role && message.role !== "system"),
+      { withTools: true },
+    ),
     { role: "user", content: task.trim() },
   ];
 
   let activeModel = model;
   let client = new AgentRouterClient({ apiKey, baseUrl, model: activeModel });
   let usedFallback = false;
+  let emptyStalls = 0;
+  let usedTools = false;
   const startedAt = Date.now();
 
   onEvent({ type: "start", model: activeModel, task: task.trim(), maxTurns, baseUrl });
@@ -74,13 +145,14 @@ export async function runAgentLoop({
     if (signal?.aborted) throw new Error("Agent run cancelled.");
 
     compactOlderToolResults(messages);
+    const requestMessages = ensureThinkingFields(messages, { withTools: true });
     const turnStarted = Date.now();
     onEvent({ type: "model_request", turn, model: activeModel });
 
     let completion;
     try {
       completion = await client.chatCompletions({
-        messages,
+        messages: requestMessages,
         tools,
         tool_choice: "auto",
       });
@@ -110,7 +182,7 @@ export async function runAgentLoop({
         reason: error instanceof Error ? error.message : String(error),
       });
       completion = await client.chatCompletions({
-        messages,
+        messages: requestMessages,
         tools,
         tool_choice: "auto",
       });
@@ -121,27 +193,47 @@ export async function runAgentLoop({
     if (!message) throw new Error("AgentRouter returned an empty completion.");
 
     const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    const answerText = extractMessageText(message);
     onEvent({
       type: "model_response",
       turn,
       model: activeModel,
       ms: Date.now() - turnStarted,
-      content: (message.content || "").trim(),
+      content: answerText,
       toolCallCount: toolCalls.length,
       finishReason: choice?.finish_reason,
       usage: completion?.usage || null,
       proxy: completion?._proxy || null,
     });
 
-    messages.push({
-      role: "assistant",
-      content: message.content ?? null,
-      tool_calls: message.tool_calls,
-      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
-    });
+    messages.push(
+      normalizeAssistantMessage({
+        role: "assistant",
+        content: message.content == null ? "" : message.content,
+        tool_calls: message.tool_calls,
+        reasoning_content: message.reasoning_content ?? "",
+      }),
+    );
 
     if (!toolCalls.length) {
-      const answer = (message.content || "").trim() || "(model finished with no text)";
+      const hasReasoning = Boolean(String(message.reasoning_content || "").trim());
+      const shouldContinue =
+        !answerText && emptyStalls < 3 && (usedTools || hasReasoning || turn === 1);
+
+      if (shouldContinue) {
+        emptyStalls += 1;
+        onEvent({
+          type: "model_stall",
+          turn,
+          model: activeModel,
+          attempt: emptyStalls,
+          note: "Empty assistant turn; prompting the model to continue.",
+        });
+        messages.push({ role: "user", content: EMPTY_CONTINUE_PROMPT });
+        continue;
+      }
+
+      const answer = answerText || "(model finished with no text)";
       onEvent({
         type: "final",
         turn,
@@ -151,6 +243,9 @@ export async function runAgentLoop({
       });
       return { ok: true, answer, turns: turn, model: activeModel, messages };
     }
+
+    emptyStalls = 0;
+    usedTools = true;
 
     for (const call of toolCalls) {
       if (signal?.aborted) throw new Error("Agent run cancelled.");
@@ -176,6 +271,18 @@ export async function runAgentLoop({
         };
       }
 
+      // UI-only fields (e.g. screenshot preview data URLs) must never reach the LLM.
+      let previewUrl = null;
+      let previewAlt = null;
+      let previewCaption = null;
+      if (result && typeof result === "object" && result.__uiPreview) {
+        previewUrl = result.__uiPreview.url || null;
+        previewAlt = result.__uiPreview.alt || null;
+        previewCaption = result.__uiPreview.caption || null;
+        const { __uiPreview, ...safeResult } = result;
+        result = safeResult;
+      }
+
       onEvent({
         type: "tool_result",
         turn,
@@ -184,6 +291,9 @@ export async function runAgentLoop({
         ok: result?.ok !== false,
         ms: Date.now() - toolStarted,
         summary: summarizeForLog(result, 180),
+        previewUrl,
+        previewAlt,
+        previewCaption,
       });
 
       messages.push({

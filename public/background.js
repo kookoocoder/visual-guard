@@ -49,6 +49,57 @@ async function claimSubmission(tabId, value) {
   return { ok: true, fingerprint };
 }
 
+const BOOKMARK_RESULT_LIMIT = 80;
+
+function flattenBookmarks(nodes, folderPath = []) {
+  const items = [];
+  for (const node of nodes || []) {
+    const title = typeof node.title === "string" ? node.title : "";
+    if (typeof node.url === "string" && node.url) {
+      items.push({
+        title,
+        url: node.url,
+        folder: folderPath.filter(Boolean).join(" / "),
+      });
+    }
+    if (Array.isArray(node.children) && node.children.length) {
+      const nextPath = title ? [...folderPath, title] : folderPath;
+      items.push(...flattenBookmarks(node.children, nextPath));
+    }
+  }
+  return items;
+}
+
+function bookmarkMatches(item, query) {
+  const terms = String(query || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!terms.length) return true;
+  const haystack = `${item.title}\n${item.url}\n${item.folder}`.toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
+async function listBookmarks(query) {
+  if (!chrome.bookmarks?.getTree) {
+    throw new Error("Bookmarks permission is missing. Reload the extension from chrome://extensions.");
+  }
+  const tree = await chrome.bookmarks.getTree();
+  const matched = flattenBookmarks(tree).filter((item) => bookmarkMatches(item, query));
+  return {
+    ok: true,
+    query: String(query || "").trim() || null,
+    total: matched.length,
+    truncated: matched.length > BOOKMARK_RESULT_LIMIT,
+    bookmarks: matched.slice(0, BOOKMARK_RESULT_LIMIT).map((item) => ({
+      title: item.title,
+      url: item.url,
+      folder: item.folder,
+      openable: /^https?:\/\//i.test(item.url),
+    })),
+  };
+}
+
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tabs[0] ?? null;
@@ -251,6 +302,7 @@ async function gatherPageState(tabId) {
       elements,
       textForLocalModel,
       frames: states.length,
+      viewport: top.viewport || null,
       capturedAt: new Date().toISOString(),
     },
   };
@@ -271,6 +323,40 @@ function serializeTab(tab) {
     url: tab.url ?? "",
     favIconUrl: tab.favIconUrl ?? "",
   };
+}
+
+async function uploadImageToTab(tab, tool) {
+  const dataUrl = String(tool.data_url || "");
+  if (!dataUrl.startsWith("data:image/")) throw new Error("No image is available to upload.");
+  await activateTab(tab);
+  await ensureContentScript(tab.id);
+
+  const payload = {
+    type: "UPLOAD_IMAGE",
+    dataUrl,
+    filename: "screenshot.jpg",
+  };
+
+  if (tool.selector_ref) {
+    const { frameId, localRef } = parseFrameRef(tool.selector_ref);
+    payload.selectorRef = localRef;
+    const response = await sendToFrame(tab.id, frameId, payload);
+    if (!response?.ok) throw new Error(response?.error || "Unable to upload the image.");
+    return response;
+  }
+
+  const frameIds = await listFrameIds(tab.id);
+  let lastError = "No image file input is on this page.";
+  for (const frameId of frameIds) {
+    try {
+      const response = await sendToFrame(tab.id, frameId, payload);
+      if (response?.ok) return response;
+      lastError = response?.error || lastError;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new Error(lastError);
 }
 
 async function executeTool(tool, tab) {
@@ -402,6 +488,8 @@ async function executeTool(tool, tab) {
     }
     case "screenshot":
       return { ok: true, action: "screenshot", dataUrl: await captureTab(tab) };
+    case "upload_image":
+      return uploadImageToTab(tab, tool);
     default:
       throw new Error(`Unknown tool: ${tool.name}`);
   }
@@ -442,6 +530,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       if (message.type === "GET_ACTIVE_TAB") {
         sendResponse({ ok: true, tab: serializeTab(await getActiveTab()) });
+        return;
+      }
+
+      if (message.type === "GET_BOOKMARKS") {
+        sendResponse(await listBookmarks(message.query));
         return;
       }
 

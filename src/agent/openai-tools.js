@@ -6,6 +6,17 @@ const PARAMETER_SCHEMAS = {
     properties: {},
     required: [],
   },
+  list_bookmarks: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description:
+          "Words matched against bookmark title, folder, and URL, such as GATE CS. Omit only when the user wants the full saved-links list.",
+      },
+    },
+    required: [],
+  },
   get_page_state: {
     type: "object",
     properties: {
@@ -38,6 +49,18 @@ const PARAMETER_SCHEMAS = {
       tab_id: { type: "integer", description: "Optional target tab ID. Use the same tab that supplied selector_ref." },
     },
     required: ["selector_ref", "text"],
+  },
+  upload_image: {
+    type: "object",
+    properties: {
+      selector_ref: {
+        type: "string",
+        description:
+          "Stable ref of a role \"file\" input, or of the attach control that owns one. Omit to use the page's image file input.",
+      },
+      tab_id: { type: "integer", description: "Optional target tab ID. Use the chat tab, not the tab you screenshotted." },
+    },
+    required: [],
   },
   press_key: {
     type: "object",

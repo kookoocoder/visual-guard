@@ -71,10 +71,90 @@ main.lg .lg-body {
   overflow: hidden;
 }
 
-.view[data-view-panel="controls"] {
+.view[data-view-panel="history"] {
   overflow-y: auto;
   overscroll-behavior: contain;
-  gap: 0;
+  gap: 10px;
+}
+
+.history-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-empty {
+  margin: 8px 2px;
+  color: var(--lg-muted);
+  font-size: 13px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-item__open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 14px;
+  padding: 10px 12px;
+  text-align: left;
+  font: inherit;
+  color: var(--lg-fg);
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+
+.history-item.is-on .history-item__open {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.history-item__open:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.history-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.history-item__time {
+  flex: none;
+  color: var(--lg-muted);
+  font-size: 11px;
+}
+
+.history-item__delete {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--lg-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.history-item__delete:hover {
+  color: var(--lg-danger);
 }
 
 .head {

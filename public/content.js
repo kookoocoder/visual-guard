@@ -11,6 +11,8 @@
     card: "[REDACTED:CARD]",
     email: "[REDACTED:EMAIL]",
     secret: "[REDACTED:SECRET]",
+    id: "[REDACTED:ID]",
+    phone: "[REDACTED:PHONE]",
   };
 
   const INTERACTIVE_SELECTOR = [
@@ -61,12 +63,19 @@
   function sensitiveKind(element) {
     const type = (element.getAttribute("type") || "").toLowerCase();
     const autocomplete = (element.getAttribute("autocomplete") || "").toLowerCase();
-    const hint = `${type} ${autocomplete} ${element.getAttribute("name") || ""}`.toLowerCase();
+    const hint = `${type} ${autocomplete} ${element.getAttribute("name") || ""} ${element.getAttribute("id") || ""} ${element.getAttribute("placeholder") || ""} ${element.getAttribute("aria-label") || ""}`.toLowerCase();
 
     if (type === "password" || /password|passcode|pin/.test(hint)) return "password";
-    if (/cc-|card|credit/.test(hint)) return "card";
-    if (type === "email" || /email/.test(hint)) return "email";
-    if (/token|secret|api[-_ ]?key/.test(hint)) return "secret";
+    if (/cc-|card|credit|cvv|cvc/.test(hint)) return "card";
+    if (type === "email" || /e-?mail/.test(hint)) return "email";
+    if (/token|secret|api[-_ ]?key|otp|one[-_ ]?time/.test(hint)) return "secret";
+    // Government / passenger identity — agent must not autofill these.
+    if (/aadhaar|aadhar|uidai|passport|pan\b|voter|national.?id|govt.?id|government.?id/.test(hint)) {
+      return "id";
+    }
+    if (/\b(dob|date[-_ ]?of[-_ ]?birth|birth[-_ ]?date)\b/.test(hint)) return "id";
+    if (/\b(mobile|phone|tel|whatsapp)\b/.test(hint) && type !== "search") return "phone";
+    if (/\b(passenger|full[-_ ]?name|first[-_ ]?name|last[-_ ]?name|surname)\b/.test(hint)) return "id";
     return "";
   }
 
@@ -128,6 +137,7 @@
     if (tag === "input") {
       if (type === "checkbox") return "checkbox";
       if (type === "radio") return "radio";
+      if (type === "file") return "file";
       if (type === "submit" || type === "button") return "button";
       return "textbox";
     }
@@ -244,6 +254,7 @@
     for (const doc of collectDocuments()) {
       for (const element of doc.querySelectorAll(INTERACTIVE_SELECTOR)) {
         if (seen.has(element) || !isVisible(element)) continue;
+        if (element instanceof HTMLInputElement && element.type === "file") continue;
         seen.add(element);
         const serialized = serializeElement(element);
         if (!serialized.label || serialized.label === "Unlabeled element") continue;
@@ -252,7 +263,42 @@
     }
 
     collected.sort((a, b) => b.score - a.score);
-    return collected.slice(0, limit).map((item) => item.serialized);
+    const ranked = collected.slice(0, limit).map((item) => item.serialized);
+    const seenRefs = new Set(ranked.map((item) => item.ref));
+    for (const element of docFileInputs()) {
+      const serialized = describeFileInput(element);
+      if (seenRefs.has(serialized.ref)) continue;
+      seenRefs.add(serialized.ref);
+      ranked.push(serialized);
+    }
+    return ranked;
+  }
+
+  function queryAllDeep(selector, root = document) {
+    const found = [...root.querySelectorAll(selector)];
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) found.push(...queryAllDeep(selector, element.shadowRoot));
+    }
+    return found;
+  }
+
+  function docFileInputs(doc = document) {
+    return queryAllDeep("input[type='file']", doc).filter(
+      (element) => element instanceof HTMLInputElement && !element.disabled,
+    );
+  }
+
+  function describeFileInput(element) {
+    const serialized = serializeElement(element);
+    const accept = element.getAttribute("accept") || "";
+    serialized.role = "file";
+    serialized.accept = accept;
+    serialized.hidden = !isVisible(element);
+    serialized.value = element.files?.length ? `${element.files.length} attached` : "";
+    if (!serialized.label || serialized.label === "Unlabeled element") {
+      serialized.label = accept ? `File upload ${accept}` : "File upload";
+    }
+    return serialized;
   }
 
   function collectReadableText(maxChars = 8000) {
@@ -418,6 +464,11 @@
       elements: collectElements(120),
       textForLocalModel: collectReadableText(8000),
       frame: window === window.top ? "top" : "iframe",
+      viewport: {
+        width: window.innerWidth || 0,
+        height: window.innerHeight || 0,
+        dpr: window.devicePixelRatio || 1,
+      },
       capturedAt: new Date().toISOString(),
     };
   }
@@ -496,6 +547,12 @@
 
   function clickElement(selectorRef) {
     const element = resolve(selectorRef);
+    if (element instanceof HTMLInputElement && element.type === "file") {
+      throw new Error("Clicking a file input opens the system file dialog. Call upload_image with this selector_ref instead.");
+    }
+    if (element instanceof HTMLLabelElement && element.control?.type === "file") {
+      throw new Error("That label opens a file dialog. Call upload_image with this selector_ref instead.");
+    }
     element.scrollIntoView({ block: "center", inline: "nearest" });
 
     const target =
@@ -527,6 +584,89 @@
     return { action: "click", ref: selectorRef, label: getLabel(element) || "element", role: roleFor(element) };
   }
 
+  function acceptsImages(input) {
+    const accept = (input.getAttribute("accept") || "").toLowerCase();
+    if (!accept || accept.includes("*")) return true;
+    return /image|\.png|\.jpe?g|\.webp|\.gif|\.bmp/.test(accept);
+  }
+
+  function fileInputFrom(element) {
+    if (element instanceof HTMLInputElement && element.type === "file" && !element.disabled) return element;
+    if (element instanceof HTMLLabelElement && element.control?.type === "file" && !element.control.disabled) {
+      return element.control;
+    }
+    const nested = element.querySelector?.("input[type='file']:not([disabled])");
+    if (nested instanceof HTMLInputElement) return nested;
+    const form = element.closest?.("form");
+    const inForm = [...(form?.querySelectorAll("input[type='file']:not([disabled])") || [])].find(acceptsImages);
+    if (inForm) return inForm;
+    let node = element.parentElement;
+    for (let depth = 0; depth < 4 && node; depth += 1) {
+      const found = queryAllDeep("input[type='file']:not([disabled])", node).filter(acceptsImages);
+      if (found.length === 1) return found[0];
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function chooseFileInput(selectorRef) {
+    if (selectorRef) {
+      const input = fileInputFrom(resolve(selectorRef));
+      if (!input) {
+        throw new Error(
+          "That element is not a file input and no image upload is associated with it. Call get_page_state and pass a role file ref, or call upload_image without selector_ref.",
+        );
+      }
+      return input;
+    }
+
+    const inputs = docFileInputs().filter(acceptsImages);
+    if (inputs.length === 1) return inputs[0];
+    const imageSpecific = inputs.filter((input) => /image/i.test(input.getAttribute("accept") || ""));
+    if (imageSpecific.length === 1) return imageSpecific[0];
+    if (inputs.length > 1) {
+      const choices = inputs.slice(0, 8).map((input) => {
+        const described = describeFileInput(input);
+        return `${described.ref} (${described.label})`;
+      });
+      throw new Error(`Several file inputs exist. Call upload_image with selector_ref. Choices: ${choices.join("; ")}`);
+    }
+    throw new Error(
+      "No image file input is on this page. Open the attachment control if the input is created on demand, call get_page_state, then upload_image with the file ref.",
+    );
+  }
+
+  function dataUrlToFile(dataUrl, filename) {
+    const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(String(dataUrl || ""));
+    if (!match) throw new Error("The screenshot is not an image data URL.");
+    const mime = match[1] || "image/jpeg";
+    if (!mime.startsWith("image/")) throw new Error("Only image uploads are supported.");
+    const binary = match[2] ? atob(match[3]) : decodeURIComponent(match[3]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new File([bytes], filename || "screenshot.jpg", { type: mime });
+  }
+
+  function uploadImage(selectorRef, dataUrl, filename) {
+    const input = chooseFileInput(selectorRef);
+    const file = dataUrlToFile(dataUrl, filename);
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    if (!input.files?.length) throw new Error("The page did not accept the image file.");
+    const described = describeFileInput(input);
+    return {
+      action: "upload_image",
+      ref: selectorRef || described.ref,
+      label: described.label,
+      filename: file.name,
+      bytes: file.size,
+      accept: described.accept || "",
+    };
+  }
+
   function typeElement(selectorRef, text) {
     const element = resolve(selectorRef);
     const target = editableTarget(element);
@@ -534,8 +674,10 @@
       throw new Error("The selected element is not editable.");
     }
     const blocked = sensitiveKind(target);
-    if (blocked === "password" || blocked === "card" || blocked === "secret") {
-      throw new Error("Typing into sensitive fields is blocked.");
+    if (blocked === "password" || blocked === "card" || blocked === "secret" || blocked === "id" || blocked === "phone" || blocked === "email") {
+      throw new Error(
+        `Typing into ${blocked} fields is blocked for privacy. Ask the user to fill this field on the page manually.`,
+      );
     }
 
     target.scrollIntoView({ block: "center", inline: "nearest" });
@@ -773,6 +915,12 @@
           break;
         case "TYPE":
           sendResponse({ ok: true, result: typeElement(message.selectorRef, message.text || "Local test") });
+          break;
+        case "UPLOAD_IMAGE":
+          sendResponse({
+            ok: true,
+            result: uploadImage(message.selectorRef || "", message.dataUrl, message.filename),
+          });
           break;
         case "PRESS_KEY":
           sendResponse({ ok: true, result: pressKey(message.selectorRef, message.key) });

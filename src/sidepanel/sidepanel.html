@@ -62,8 +62,8 @@
             <button class="seg__item is-on" type="button" role="tab" aria-selected="true" data-view="chat">
               <span>Chat</span>
             </button>
-            <button class="seg__item" type="button" role="tab" aria-selected="false" data-view="controls">
-              <span>Controls</span>
+            <button class="seg__item" type="button" role="tab" aria-selected="false" data-view="history">
+              <span>History</span>
             </button>
           </div>
           <span class="lg-pill" id="state">idle</span>
@@ -112,92 +112,25 @@
           </form>
         </section>
 
-        <section class="view lg-scroll" data-view-panel="controls" hidden>
-          <section class="lg-surface card">
-            <div class="lg-row">
-              <span class="side">
-                <span class="lg-dot lg-dot--ok" id="dot"></span>
-                <span class="lg-label">Glass</span>
-              </span>
-              <span class="lg-sub" id="source">black panel</span>
-            </div>
-            <div class="lg-row">
-              <span class="lg-label">Optics</span>
-              <span class="lg-sub" id="optics">displacement</span>
-            </div>
-          </section>
-
-          <section class="lg-surface card">
-            <div class="lg-field" id="refraction" data-key="refraction" data-min="0" data-max="400" data-step="5" data-value="250" tabindex="0" role="slider" aria-label="Refraction">
-              <span class="lg-field__label">Refraction</span>
-              <div class="lg-slider">
-                <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
-                <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
-              </div>
-              <output class="lg-field__out">250</output>
-            </div>
-
-            <div class="lg-field" id="blur" data-key="blur" data-min="0" data-max="16" data-step="0.5" data-value="2" tabindex="0" role="slider" aria-label="Blur">
-              <span class="lg-field__label">Blur</span>
-              <div class="lg-slider">
-                <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
-                <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
-              </div>
-              <output class="lg-field__out">2</output>
-            </div>
-
-            <div class="lg-field" id="tint" data-key="tint" data-min="0.02" data-max="0.8" data-step="0.01" data-value="0.55" tabindex="0" role="slider" aria-label="Tint">
-              <span class="lg-field__label">Tint</span>
-              <div class="lg-slider">
-                <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
-                <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
-              </div>
-              <output class="lg-field__out">0.55</output>
-            </div>
-
-            <div class="lg-field" id="fringe" data-key="fringe" data-min="0" data-max="6" data-step="0.5" data-value="0" tabindex="0" role="slider" aria-label="Fringe">
-              <span class="lg-field__label">Fringe</span>
-              <div class="lg-slider">
-                <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
-                <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
-              </div>
-              <output class="lg-field__out">0</output>
-            </div>
-
-            <div class="lg-field" id="dim" data-key="dim" data-min="0" data-max="0.7" data-step="0.02" data-value="0" tabindex="0" role="slider" aria-label="Dim">
-              <span class="lg-field__label">Dim</span>
-              <div class="lg-slider">
-                <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
-                <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
-              </div>
-              <output class="lg-field__out">0</output>
-            </div>
-          </section>
-
-          <section class="lg-surface card" id="settings-panel">
-            <div class="lg-row">
-              <label class="lg-label" for="model">Model</label>
-              <select id="model">
-                <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-                <option value="glm-5.3">glm-5.3</option>
-              </select>
-            </div>
-            <div class="lg-row">
-              <label class="lg-label" for="api-key">API key</label>
-              <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
-            </div>
-            <div class="lg-row">
-              <label class="lg-label" for="base-url">Base URL</label>
-              <input id="base-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:8787/v1" />
-            </div>
-          </section>
-
-          <p class="note" id="note">
-            Liquid glass on the black panel. Refraction stays on the rim so the chat stays readable.
-          </p>
+        <section class="view lg-scroll" data-view-panel="history" hidden>
+          <div class="history-bar">
+            <button class="lg-btn" id="history-new" type="button">
+              <span>New chat</span>
+            </button>
+          </div>
+          <div id="history-list" class="history-list"></div>
         </section>
       </div>
     </main>
+
+    <div hidden>
+      <select id="model" aria-hidden="true" tabindex="-1">
+        <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+        <option value="glm-5.3">glm-5.3</option>
+      </select>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" tabindex="-1" />
+      <input id="base-url" type="url" spellcheck="false" tabindex="-1" />
+    </div>
 
     <script type="module" src="./sidepanel.js"></script>
   </body>

@@ -1,9 +1,22 @@
-import { ImagePrivacyModel } from "../client/models/image-redactor.js";
-import { TextPrivacyModel } from "../client/models/text-redactor.js";
+import { ImagePrivacyModel, paintSensitiveBoxes } from "../client/models/image-redactor.js";
+import { extractOcrWords, mapSpansToBoxes } from "../client/models/ocr-redactor.js";
+import {
+  TextPrivacyModel,
+  applyKnownTokens,
+  collectKnownTokens,
+} from "../client/models/text-redactor.js";
 import { getToolDefinition } from "../shared/tool-contract.js";
 import { runAgentLoop } from "../agent/agent-loop.js";
 import { loadAgentSettings, saveAgentSettings } from "../agent/settings.js";
 import { AGENT_CONFIG } from "../agent/config.js";
+import {
+  deleteConversation,
+  listConversations,
+  migrateSessionHistory,
+  putConversation,
+  titleFromMessages,
+  transcriptFromMessages,
+} from "./history-db.js";
 
 const $ = (selector) => document.querySelector(selector);
 const hasExtensionRuntime = typeof chrome !== "undefined" && Boolean(chrome.runtime?.sendMessage);
@@ -30,26 +43,69 @@ const state = {
   agentHistory: [],
   busy: false,
   logLines: [],
+  lastUpload: null,
+  conversationId: null,
+  conversationCreatedAt: null,
+  knownPiiTokens: [],
   _nerLoadLogged: false,
   _hasLoadLogged: false,
 };
 
-const AGENT_HISTORY_KEY = "visualGuardAgentHistory";
 let turnUi = null;
 let runSignal = null;
 let gatedExecute = null;
 
-async function loadAgentHistory() {
-  if (!hasExtensionRuntime || !chrome.storage?.session) return;
-  const stored = await chrome.storage.session.get(AGENT_HISTORY_KEY);
-  if (Array.isArray(stored?.[AGENT_HISTORY_KEY])) {
-    state.agentHistory = stored[AGENT_HISTORY_KEY];
-  }
+function applyConversation(record, chat) {
+  state.conversationId = record?.id || null;
+  state.conversationCreatedAt = record?.createdAt || null;
+  state.agentHistory = Array.isArray(record?.messages) ? record.messages : [];
+  chat?.loadTranscript(transcriptFromMessages(state.agentHistory));
 }
 
 async function saveAgentHistory() {
-  if (!hasExtensionRuntime || !chrome.storage?.session) return;
-  await chrome.storage.session.set({ [AGENT_HISTORY_KEY]: state.agentHistory });
+  if (!state.agentHistory.length) return;
+  const now = Date.now();
+  if (!state.conversationId) {
+    state.conversationId = crypto.randomUUID();
+    state.conversationCreatedAt = now;
+  }
+  await putConversation({
+    id: state.conversationId,
+    title: titleFromMessages(state.agentHistory),
+    createdAt: state.conversationCreatedAt || now,
+    updatedAt: now,
+    messages: state.agentHistory,
+  });
+  window.dispatchEvent(new CustomEvent("vg-history"));
+}
+
+export function activeConversationId() {
+  return state.conversationId;
+}
+
+export async function listChatHistory() {
+  return listConversations();
+}
+
+export async function hydrateChatHistory(chat) {
+  await migrateSessionHistory();
+  const [latest] = await listConversations();
+  if (latest) applyConversation(latest, chat);
+  else applyConversation(null, chat);
+}
+
+export function openChatHistory(record, chat) {
+  applyConversation(record, chat);
+}
+
+export function startNewChat(chat) {
+  applyConversation(null, chat);
+}
+
+export async function deleteChatHistory(id, chat) {
+  await deleteConversation(id);
+  if (id === state.conversationId) applyConversation(null, chat);
+  window.dispatchEvent(new CustomEvent("vg-history"));
 }
 
 function sendRuntime(message) {
@@ -193,6 +249,7 @@ function usefulElements(elements = [], limit = 40) {
   const interactive = new Set([
     "button",
     "link",
+    "file",
     "textbox",
     "heading",
     "radio",
@@ -228,7 +285,10 @@ function usefulElements(elements = [], limit = 40) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map((item) => item.el);
+  const ranked = scored.slice(0, limit).map((item) => item.el);
+  const rankedRefs = new Set(ranked.map((el) => el.ref));
+  const files = elements.filter((el) => el.role === "file" && !rankedRefs.has(el.ref));
+  return [...files, ...ranked];
 }
 
 async function redactPageState(pageState, { maxElements = 80, maxText = 4000, forAgent = false, tabId = null } = {}) {
@@ -242,30 +302,54 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
     return values;
   });
 
-  // Agent path: use NER only when already ready. Never stall the loop on Hub download.
+  // Prefer NER whenever it is already resident. Seed every string with tokens
+  // learned from earlier scans so short labels like "yashraj" still redact
+  // even when the field batch is truncated or the model misses a span.
+  const preferNer = textModel.ready;
+  const knownTokens = state.knownPiiTokens || [];
+
   let textResult;
   let fieldResults;
   if (forAgent) {
-    const preferNer = textModel.ready;
     const [body] = await textModel.redactBatch([bodyText], {
       preferModel: preferNer,
       strictFallback: true,
       maxChars: maxText,
+      knownTokens,
     });
     textResult = body;
+    // Fields used to force preferModel:false — that leaked person names in
+    // element labels (chat display names). Run NER when ready; always reuse tokens.
     fieldResults = await textModel.redactBatch(fieldTexts, {
-      preferModel: false,
+      preferModel: preferNer,
       strictFallback: false,
       maxChars: 240,
+      knownTokens,
     });
   } else {
     const batch = await textModel.redactBatch([bodyText, ...fieldTexts], {
       preferModel: true,
       strictFallback: true,
       maxChars: maxText,
+      knownTokens,
     });
     textResult = batch[0];
     fieldResults = batch.slice(1);
+  }
+
+  // Grow the known-token dictionary from this pass (body + fields).
+  const discovered = collectKnownTokens([
+    ...(textResult.spans || []),
+    ...fieldResults.flatMap((item) => item.spans || []),
+  ]);
+  if (discovered.length) {
+    const merged = new Map(
+      [...(state.knownPiiTokens || []), ...discovered].map((token) => [
+        `${token.kind}:${String(token.value).toLowerCase()}`,
+        token,
+      ]),
+    );
+    state.knownPiiTokens = [...merged.values()].slice(-200);
   }
 
   let fieldIndex = 0;
@@ -274,6 +358,13 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
     if (!element.sensitive && !String(element.value || "").startsWith("[REDACTED:")) {
       safe.value = fieldResults[fieldIndex++].text;
     }
+    // Mark elements whose label/value was rewritten so screenshot DOM paint can cover them.
+    const rawLabel = String(element.label || "");
+    const rawValue = String(element.value || "");
+    safe.piiMasked =
+      safe.label !== rawLabel ||
+      (safe.value != null && safe.value !== rawValue) ||
+      Boolean(element.sensitive);
     return safe;
   });
 
@@ -283,6 +374,7 @@ async function redactPageState(pageState, { maxElements = 80, maxText = 4000, fo
     textForLocalModel: undefined,
     elements: safeElements,
     redactedText: textResult.text,
+    viewport: pageState.viewport || null,
   };
   return { textResult, safeElements };
 }
@@ -292,12 +384,15 @@ async function scanPage({ forAgent = false, tabId = null } = {}) {
   setStatus("busy", "scanning");
   if (!hasExtensionRuntime) throw new Error("Load the built extension in Chrome.");
 
-  // Manual scans can wait for NER; agent path must not hang on first-run download.
+  // Manual scans can wait for NER; agent path waits for an in-flight load but
+  // still avoids starting a fresh multi-minute Hub download mid-turn.
   if (!forAgent && textModel.status !== "ready" && !textModel.unavailable) {
     setStatus("busy", "loading ner");
     await textModel.ensureLoaded().catch(() => {});
+  } else if (forAgent && textModel.loadingPromise) {
+    setStatus("busy", "loading ner");
+    await textModel.loadingPromise.catch(() => {});
   }
-  // Agent: do not start a competing GPU load here — runAgent schedules a delayed warm.
 
   const response = await sendRuntime({ type: "SCAN_PAGE", tabId });
   const pageResponse = unwrapContentResult(response);
@@ -341,11 +436,75 @@ async function scanPage({ forAgent = false, tabId = null } = {}) {
         frames: pageState.frames || 1,
         nerError: textModel.lastError || null,
         redactMode: textResult.mode || null,
+        knownTokens: (state.knownPiiTokens || []).length,
       },
     },
   );
   setStatus(textModel.status === "error" ? "error" : "ready", textModel.status === "error" ? "ner fallback" : "ready");
   return pageState;
+}
+
+function rememberUpload(_captureDataUrl, redacted) {
+  // Fail closed: never store the raw capture. Empty HaS detections already
+  // produce a FRAME WITHHELD placeholder — keep that, do not fall open.
+  if (redacted.error) {
+    const withheld = Boolean(redacted.dataUrl);
+    state.lastUpload = withheld
+      ? { dataUrl: redacted.dataUrl, masked: true, withheld: true }
+      : null;
+    return;
+  }
+  state.lastUpload = {
+    dataUrl: redacted.dataUrl,
+    masked: true,
+    withheld: false,
+  };
+}
+
+function sensitiveDomBoxes(pageState = state.pageState) {
+  const elements = pageState?.elements || [];
+  const boxes = [];
+  for (const element of elements) {
+    const bounds = element.bounds;
+    if (!bounds || !(bounds.width > 1) || !(bounds.height > 1)) continue;
+    const text = `${element.label || ""} ${element.value || ""}`;
+    const shouldPaint =
+      Boolean(element.piiMasked) ||
+      Boolean(element.sensitive) ||
+      /\[[A-Z][A-Z0-9_]{1,20}\]/.test(text);
+    if (!shouldPaint) continue;
+    boxes.push({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      kind: element.sensitiveKind || "NAME",
+    });
+  }
+  return boxes;
+}
+
+async function compressImageDataUrl(dataUrl) {
+  const image = new Image();
+  image.decoding = "async";
+  image.src = dataUrl;
+  await image.decode();
+  const maxEdge = 1280;
+  const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round((image.naturalWidth || 1) * scale));
+  canvas.height = Math.max(1, Math.round((image.naturalHeight || 1) * scale));
+  const context = canvas.getContext("2d", { alpha: false });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  let quality = 0.82;
+  let url = canvas.toDataURL("image/jpeg", quality);
+  while (url.length > 1_400_000 && quality > 0.45) {
+    quality -= 0.12;
+    url = canvas.toDataURL("image/jpeg", quality);
+  }
+  return url;
 }
 
 async function captureFrame() {
@@ -354,8 +513,84 @@ async function captureFrame() {
   const response = await sendRuntime({ type: "CAPTURE_VISIBLE_TAB" });
   if (!response?.ok || !response.dataUrl) throw new Error(response?.error || "Capture failed.");
 
-  const redacted = await imageModel.redact(response.dataUrl);
-  showPreview(redacted.dataUrl);
+  // OCR the raw capture on CPU while HaS runs on GPU.
+  const ocrPromise = extractOcrWords(response.dataUrl, {
+    onProgress: (message) => {
+      if (message?.status === "recognizing text" && Number.isFinite(message.progress)) {
+        setStatus("busy", `ocr ${Math.round(message.progress * 100)}%`);
+      }
+    },
+  }).catch((error) => ({
+    text: "",
+    words: [],
+    elapsedMs: 0,
+    error: error instanceof Error ? error.message : String(error),
+  }));
+
+  let redacted = await imageModel.redact(response.dataUrl);
+
+  // Free HaS before NER loads — they cannot share VRAM.
+  try {
+    await imageModel.dispose();
+  } catch {
+    // ignore
+  }
+
+  if (!redacted.error) {
+    try {
+      setStatus("busy", "ocr → ner");
+      const ocr = await ocrPromise;
+      if (ocr.error) {
+        log("ocr", ocr.error, { level: "warn" });
+      } else if (ocr.text?.trim()) {
+        await textModel.ensureLoaded().catch(() => {});
+        const refined = await textModel.redact(ocr.text, {
+          preferModel: true,
+          knownTokens: state.knownPiiTokens || [],
+          maxChars: 6000,
+        });
+        const boxes = mapSpansToBoxes(ocr.words || [], refined.spans);
+        if (boxes.length) {
+          // OCR boxes are already in capture pixel space (not CSS * dpr).
+          const painted = await paintSensitiveBoxes(redacted.dataUrl, boxes, {
+            dpr: 1,
+            label: "OCR PII",
+          });
+          redacted = {
+            ...redacted,
+            dataUrl: painted,
+            mode: `${redacted.mode} + ocr + ${refined.mode} (${boxes.length})`,
+            ocrBoxes: boxes.length,
+            ocrSpans: (refined.spans || []).slice(0, 12),
+          };
+        }
+      }
+    } catch (error) {
+      log("ocr", error instanceof Error ? error.message : String(error), { level: "warn" });
+    }
+
+    try {
+      if (!state.pageState) {
+        await scanPage({ forAgent: true }).catch(() => {});
+      }
+      const boxes = sensitiveDomBoxes(state.pageState);
+      if (boxes.length) {
+        const dpr = Number(state.pageState?.viewport?.dpr) || 1;
+        const painted = await paintSensitiveBoxes(redacted.dataUrl, boxes, { dpr, label: "DOM PII" });
+        redacted = {
+          ...redacted,
+          dataUrl: painted,
+          mode: `${redacted.mode} + DOM PII (${boxes.length})`,
+          domBoxes: boxes.length,
+        };
+      }
+    } catch {
+      // Keep HaS/OCR output if DOM paint fails — never fall back to the raw capture.
+    }
+  }
+
+  rememberUpload(response.dataUrl, redacted);
+  showPreview(state.lastUpload?.dataUrl || redacted.dataUrl);
   log(
     "screenshot",
     `${redacted.mode} · ${redacted.detections?.length ?? 0} masks · ${redacted.elapsedMs}ms`,
@@ -364,6 +599,10 @@ async function captureFrame() {
       detail: {
         detections: (redacted.detections || []).slice(0, 12),
         error: redacted.error || null,
+        withheld: Boolean(state.lastUpload?.withheld),
+        domBoxes: redacted.domBoxes || 0,
+        ocrBoxes: redacted.ocrBoxes || 0,
+        ocrSpans: redacted.ocrSpans || [],
       },
     },
   );
@@ -391,13 +630,20 @@ async function redactToolResult(value) {
   if (!value || typeof value !== "object") return value;
   if (Array.isArray(value)) return Promise.all(value.map(redactToolResult));
 
+  const knownTokens = state.knownPiiTokens || [];
+  const preferNer = textModel.ready;
   const safeEntries = await Promise.all(
     Object.entries(value)
       .filter(([key]) => !/raw|textForLocalModel/i.test(key))
       .map(async ([key, item]) => {
-        if (typeof item === "string" && /label|value|text|title|url/i.test(key)) {
-          // Deterministic only — page body already went through NER; avoid extra WebGPU passes.
-          const redacted = await textModel.redact(item, { preferModel: false, strictFallback: true });
+        if (typeof item === "string" && /label|value|text|title|url|folder/i.test(key)) {
+          // Use NER when resident; always re-apply known person-name tokens so
+          // titles/bookmarks cannot reintroduce names from an earlier scan.
+          const redacted = await textModel.redact(item, {
+            preferModel: preferNer,
+            strictFallback: true,
+            knownTokens,
+          });
           return [key, redacted.text];
         }
         return [key, await redactToolResult(item)];
@@ -485,6 +731,22 @@ async function executeAgentTool(name, args = {}) {
     };
   }
 
+  if (name === "list_bookmarks") {
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    const response = await sendRuntime({ type: "GET_BOOKMARKS", query });
+    if (!response?.ok) throw new Error(response?.error || "Unable to read bookmarks.");
+    return {
+      ok: true,
+      query: response.query ?? null,
+      total: response.total ?? 0,
+      truncated: Boolean(response.truncated),
+      bookmarks: await redactToolResult(response.bookmarks || []),
+      note: response.truncated
+        ? "Results truncated. Call list_bookmarks again with a narrower query."
+        : "Saved bookmarks from this Chrome profile. navigate can open only entries marked openable.",
+    };
+  }
+
   if (name === "get_page_state") {
     const tabId = Number.isInteger(args.tab_id) ? args.tab_id : null;
     await scanPage({ forAgent: true, tabId });
@@ -496,7 +758,7 @@ async function executeAgentTool(name, args = {}) {
       url: metadata.url,
       title: metadata.title,
       frames: safe.frames || 1,
-      elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag, checked, bounds }) => ({
+      elements: (safe.elements || []).map(({ ref, role, label, value, sensitive, tag, checked, bounds, accept, hidden }) => ({
         ref,
         role,
         label,
@@ -505,6 +767,7 @@ async function executeAgentTool(name, args = {}) {
         sensitive: Boolean(sensitive),
         tag,
         bounds,
+        ...(role === "file" ? { accept: accept || "", hidden: Boolean(hidden) } : {}),
       })),
       text: (safe.redactedText || "").slice(0, 4000),
       text_preview: (safe.redactedText || "").slice(0, 2000),
@@ -513,6 +776,7 @@ async function executeAgentTool(name, args = {}) {
 
   if (name === "screenshot") {
     const redacted = await captureFrame();
+    const previewUrl = state.lastUpload?.dataUrl || redacted.dataUrl || null;
     return {
       ok: true,
       action: "screenshot",
@@ -524,7 +788,58 @@ async function executeAgentTool(name, args = {}) {
         score: item.score,
       })),
       elapsed_ms: redacted.elapsedMs,
-      note: "Viewport masked on-device; raw pixels not sent to the chat model.",
+      stored_for_upload: Boolean(state.lastUpload?.dataUrl) && !state.lastUpload?.withheld,
+      masked: Boolean(state.lastUpload?.masked),
+      withheld: Boolean(state.lastUpload?.withheld),
+      note: state.lastUpload?.withheld
+        ? "Frame withheld — visual model found no verified masks. Pixels were not stored for upload and were not sent to the chat model."
+        : state.lastUpload?.dataUrl
+          ? "Screenshot stored on this device. Call upload_image to attach it. This result does not include pixels."
+          : "Screenshot could not be stored for upload. Pixels were not sent to the chat model.",
+      // Stripped in agent-loop before the model sees the tool result.
+      __uiPreview: previewUrl
+        ? {
+            url: previewUrl,
+            alt: state.lastUpload?.withheld
+              ? "Frame withheld — no verified privacy masks"
+              : "Redacted screenshot (on-device only)",
+            caption: state.lastUpload?.withheld
+              ? "Withheld placeholder — raw viewport was not stored."
+              : "On-device redacted capture · not sent to the chat model.",
+          }
+        : null,
+    };
+  }
+
+  if (name === "upload_image") {
+    if (!state.lastUpload?.dataUrl) {
+      throw new Error("No screenshot is stored. Call screenshot first, then upload_image on the destination tab.");
+    }
+    if (!state.lastUpload.masked) {
+      throw new Error("Refusing to upload an unmasked screenshot. Capture again after privacy models are ready.");
+    }
+    if (state.lastUpload.withheld) {
+      throw new Error(
+        "The last capture was withheld (no verified visual privacy masks). Upload blocked to avoid leaking the raw frame.",
+      );
+    }
+    const dataUrl = await compressImageDataUrl(state.lastUpload.dataUrl);
+    const tool = {
+      name: "upload_image",
+      data_url: dataUrl,
+      filename: "screenshot.jpg",
+    };
+    if (args.selector_ref) tool.selector_ref = String(args.selector_ref);
+    if (Number.isInteger(args.tab_id)) tool.tab_id = args.tab_id;
+    const response = await sendRuntime({ type: "EXECUTE_TOOL", tool });
+    const result = unwrapContentResult(response);
+    if (!result.ok) throw new Error(result.error);
+    const safe = await redactToolResult(result.result);
+    return {
+      ok: true,
+      ...safe,
+      masked: Boolean(state.lastUpload.masked),
+      note: "Attached the stored screenshot on the device. Pixels were not sent to the chat model.",
     };
   }
 
@@ -551,7 +866,17 @@ function describeCall(name, args) {
   if (name === "read_element") text = `Read ${ref || "the element"}${where}.`;
   if (name === "get_page_state") text = `Read the page${where}.`;
   if (name === "list_tabs") text = "List the open tabs.";
+  if (name === "list_bookmarks") {
+    const query = String(a.query ?? "").replace(/\s+/g, " ").trim();
+    const shown = query.length > 72 ? `${query.slice(0, 69)}…` : query;
+    text = shown ? `Search bookmarks for “${shown}”.` : "List saved bookmarks.";
+  }
   if (name === "screenshot") text = "Capture a redacted screenshot.";
+  if (name === "upload_image") {
+    text = ref
+      ? `Attach the stored screenshot to ${ref}${where}.`
+      : `Attach the stored screenshot to the page's image upload${where}.`;
+  }
   if (name === "submit") text = `Submit ${ref || "the form"}${where}.`;
   if (name === "press_key") text = `Press ${a.key || "the key"}${ref ? ` on ${ref}` : ""}${where}.`;
   if (name === "scroll") {
@@ -631,6 +956,13 @@ function handleAgentEvent(event) {
       });
       if (els.model) els.model.value = event.to;
       break;
+    case "model_stall":
+      ensureReasoning()?.write("Continuing…\n");
+      log("model", `empty turn · nudge ${event.attempt}`, {
+        level: "warn",
+        detail: event.note,
+      });
+      break;
     case "tool_call":
       endReasoning();
       turnUi?.tools.push(
@@ -643,9 +975,25 @@ function handleAgentEvent(event) {
       break;
     case "tool_result": {
       const toolUi = turnUi?.tools.shift();
+      const extras = {};
+      const previewUrl = event.previewUrl || (event.name === "screenshot" ? state.lastUpload?.dataUrl : null);
+      if (previewUrl) {
+        extras.previewUrl = previewUrl;
+        extras.previewAlt =
+          event.previewAlt ||
+          (state.lastUpload?.withheld
+            ? "Frame withheld — no verified privacy masks"
+            : "Redacted screenshot (on-device only)");
+        extras.previewCaption =
+          event.previewCaption ||
+          (state.lastUpload?.withheld
+            ? "Withheld placeholder — raw viewport was not stored."
+            : "On-device redacted capture · not sent to the chat model.");
+      }
       toolUi?.result(
         typeof event.summary === "string" ? event.summary : JSON.stringify(event.summary ?? {}, null, 2),
         event.ok ? "done" : "error",
+        extras,
       );
       log("tool", `${event.ok ? "←" : "✗"} ${event.name} · ${event.ms}ms`, {
         level: event.ok ? "info" : "error",
@@ -702,7 +1050,7 @@ async function runAgent(taskText) {
   let baseUrl = (els.baseUrl?.value || AGENT_CONFIG.baseUrl).trim().replace(/\/$/, "");
 
   if (!task) throw new Error("Enter a task first.");
-  if (!apiKey) throw new Error("Add an API key in Controls.");
+  if (!apiKey) throw new Error("Add an API key before running the agent.");
 
   if (/agentrouter\.org/i.test(baseUrl)) {
     log("proxy", "Chrome cannot call agentrouter.org directly (WAF). Switching to local proxy URL.", {
@@ -717,12 +1065,42 @@ async function runAgent(taskText) {
   try {
     await saveAgentSettings({ apiKey, model, baseUrl });
 
-    // Don't block the agent on a multi-hundred-MB GPU load. Deterministic PII
-    // covers early turns; NER loads only when explicitly needed / idle later.
+    // Warm NER immediately so the first get_page_state can redact person names.
+    // Deterministic regex never covers NAME — delaying the load leaked display names.
     if (textModel.status === "idle" && !textModel.unavailable && !textModel.loadingPromise) {
-      // Deferred so the first model request isn't fighting the agent chat round-trip.
-      setTimeout(() => textModel.ensureLoaded().catch(() => {}), 2500);
-      log("ner", "will warm in background · agent uses deterministic PII until ready");
+      textModel.ensureLoaded().catch(() => {});
+      log("ner", "warming · NAME redaction needs NER (regex alone is not enough)");
+    }
+
+    // Scrub the user task before it leaves the device (e.g. "message yashraj").
+    let safeTask = task;
+    if (textModel.ready || (state.knownPiiTokens || []).length) {
+      const scrubbed = await textModel.redact(task, {
+        preferModel: textModel.ready,
+        strictFallback: true,
+        knownTokens: state.knownPiiTokens || [],
+      });
+      safeTask = scrubbed.text;
+      const discovered = collectKnownTokens(scrubbed.spans || []);
+      if (discovered.length) {
+        const merged = new Map(
+          [...(state.knownPiiTokens || []), ...discovered].map((token) => [
+            `${token.kind}:${String(token.value).toLowerCase()}`,
+            token,
+          ]),
+        );
+        state.knownPiiTokens = [...merged.values()].slice(-200);
+      }
+    }
+
+    // Re-scrub persisted history so earlier leaked tool JSON cannot be re-sent.
+    const tokens = state.knownPiiTokens || [];
+    if (tokens.length && Array.isArray(state.agentHistory) && state.agentHistory.length) {
+      state.agentHistory = state.agentHistory.map((message) => {
+        if (!message || typeof message.content !== "string") return message;
+        const { text } = applyKnownTokens(message.content, tokens);
+        return text === message.content ? message : { ...message, content: text };
+      });
     }
 
     if (/127\.0\.0\.1|localhost/i.test(baseUrl)) {
@@ -737,7 +1115,7 @@ async function runAgent(taskText) {
     }
 
     const result = await runAgentLoop({
-      task,
+      task: safeTask,
       history: state.agentHistory,
       apiKey,
       baseUrl,
@@ -859,10 +1237,11 @@ export function createRunner(chat) {
     onRegenerate: () => {
       if (lastText) run(lastText);
     },
+    hydrate: () => hydrateChatHistory(chat),
   };
 }
 
-Promise.all([loadAgentSettings(), loadAgentHistory()])
+Promise.all([loadAgentSettings()])
   .then(async ([settings]) => {
     let baseUrl = settings.baseUrl || AGENT_CONFIG.baseUrl;
     if (/agentrouter\.org/i.test(baseUrl)) {

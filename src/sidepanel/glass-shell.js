@@ -1,4 +1,11 @@
-import { createRunner } from "./agent-backend.js";
+import {
+  activeConversationId,
+  createRunner,
+  deleteChatHistory,
+  listChatHistory,
+  openChatHistory,
+  startNewChat,
+} from "./agent-backend.js";
 
 const STORE_KEY = "lg-settings";
 const VIEW_KEY = "lg-view";
@@ -17,7 +24,7 @@ const toggle = document.getElementById("toggle");
 const settings = {
   refraction: 250,
   blur: 2,
-  tint: 0.55,
+  tint: 0.02,
   fringe: 0,
   dim: 0,
 };
@@ -60,9 +67,11 @@ function applyTint() {
 }
 
 function setState(kind, text) {
-  stateEl.textContent = text;
-  stateEl.className = "lg-pill " + (kind === "live" ? "live" : kind ? "bad" : "");
-  dot.className = "lg-dot " + (kind === "live" ? "lg-dot--ok" : "lg-dot--warn");
+  if (stateEl) {
+    stateEl.textContent = text;
+    stateEl.className = "lg-pill " + (kind === "live" ? "live" : kind ? "bad" : "");
+  }
+  if (dot) dot.className = "lg-dot " + (kind === "live" ? "lg-dot--ok" : "lg-dot--warn");
 }
 
 function applyOptics() {
@@ -72,6 +81,7 @@ function applyOptics() {
     blur: settings.blur,
     chroma: settings.fringe,
   });
+  if (!opticsEl) return;
   const base = engine.supported
     ? settings.refraction > 0
       ? "refraction + lit bezel"
@@ -181,7 +191,84 @@ function mountChat() {
   const chat = window.LiquidGlassChat.mount(root, { seed: [] });
   const runner = makeRunner(chat);
   chat.setHooks(runner);
-  return chat;
+  return { chat, hydrate: runner.hydrate };
+}
+
+function formatHistoryTime(timestamp) {
+  const date = new Date(timestamp || Date.now());
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function mountHistory(chat, show) {
+  const list = document.getElementById("history-list");
+  const newer = document.getElementById("history-new");
+  if (!list || !chat) return;
+
+  async function render() {
+    const rows = await listChatHistory().catch(() => []);
+    list.replaceChildren();
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "history-empty";
+      empty.textContent = "No saved chats yet.";
+      list.append(empty);
+      return;
+    }
+    const active = activeConversationId();
+    for (const row of rows) {
+      const item = document.createElement("div");
+      item.className = "history-item" + (row.id === active ? " is-on" : "");
+
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "history-item__open";
+      const title = document.createElement("span");
+      title.className = "history-item__title";
+      title.textContent = row.title || "New chat";
+      const when = document.createElement("span");
+      when.className = "history-item__time";
+      when.textContent = formatHistoryTime(row.updatedAt);
+      open.append(title, when);
+      open.addEventListener("click", () => {
+        if (chat.busy) return;
+        openChatHistory(row, chat);
+        show("chat");
+        render();
+      });
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "history-item__delete";
+      remove.setAttribute("aria-label", "Delete chat");
+      remove.textContent = "Delete";
+      remove.addEventListener("click", async () => {
+        if (chat.busy) return;
+        await deleteChatHistory(row.id, chat);
+        render();
+      });
+
+      item.append(open, remove);
+      list.append(item);
+    }
+  }
+
+  newer?.addEventListener("click", () => {
+    if (chat.busy) return;
+    startNewChat(chat);
+    show("chat");
+    render();
+  });
+  document.querySelector('[data-view="history"]')?.addEventListener("click", () => {
+    render();
+  });
+  window.addEventListener("vg-history", () => {
+    render();
+  });
+  render();
 }
 
 function stopCapture() {
@@ -193,9 +280,9 @@ function stopCapture() {
   stopLive();
   still.hidden = true;
   still.removeAttribute("src");
-  toggle.querySelector("span").textContent = "Capture";
+  if (toggle) toggle.querySelector("span").textContent = "Capture";
   setState("idle", "idle");
-  sourceEl.textContent = "not capturing";
+  if (sourceEl) sourceEl.textContent = "not capturing";
 }
 
 async function readViewport(tabId) {
@@ -238,8 +325,10 @@ async function paintOnce(tabId) {
   if (!stream) {
     feed.classList.add("is-off");
     setState("live", "live");
-    sourceEl.textContent = shortUrl(tab.url);
-    sourceEl.title = tab.title || tab.url || "";
+    if (sourceEl) {
+      sourceEl.textContent = shortUrl(tab.url);
+      sourceEl.title = tab.title || tab.url || "";
+    }
   }
 }
 
@@ -330,9 +419,11 @@ async function acquireOnce(explicitTabId) {
 
     if (BLOCKED.test(tab.url || "")) {
       setState("blocked", "browser page");
-      sourceEl.textContent = shortUrl(tab.url);
-      noteEl.textContent =
-        "Chrome will not hand over pixels for browser-internal pages. Switch to a normal site.";
+      if (sourceEl) sourceEl.textContent = shortUrl(tab.url);
+      if (noteEl) {
+        noteEl.textContent =
+          "Chrome will not hand over pixels for browser-internal pages. Switch to a normal site.";
+      }
       return;
     }
 
@@ -398,22 +489,28 @@ async function acquireOnce(explicitTabId) {
     layout();
     startLayoutPoll();
 
-    toggle.querySelector("span").textContent = "Stop";
+    if (toggle) toggle.querySelector("span").textContent = "Stop";
     setState("live", "live");
-    sourceEl.textContent = shortUrl(tab.url);
-    sourceEl.title = tab.title || tab.url || "";
-    noteEl.textContent =
-      "Live capture of the tab. The glass refracts it at the rim and the interior stays clean.";
+    if (sourceEl) {
+      sourceEl.textContent = shortUrl(tab.url);
+      sourceEl.title = tab.title || tab.url || "";
+    }
+    if (noteEl) {
+      noteEl.textContent =
+        "Live capture of the tab. The glass refracts it at the rim and the interior stays clean.";
+    }
   } catch (error) {
     if (!still.hidden && still.getAttribute("src")) {
       setState("live", "live");
       return;
     }
     setState("blocked", "needs a click");
-    noteEl.textContent =
-      "Chrome only allows capture right after the extension is invoked on a tab. Click the toolbar icon, then it follows from there. (" +
-      String(error).slice(0, 70) +
-      ")";
+    if (noteEl) {
+      noteEl.textContent =
+        "Chrome only allows capture right after the extension is invoked on a tab. Click the toolbar icon, then it follows from there. (" +
+        String(error).slice(0, 70) +
+        ")";
+    }
   }
 }
 
@@ -445,10 +542,10 @@ if (typeof ResizeObserver !== "undefined") {
   const stored = await chrome.storage.local.get([STORE_KEY, VIEW_KEY]).catch(() => ({}));
   if (stored && stored[STORE_KEY]) Object.assign(settings, stored[STORE_KEY]);
   settings.dim = 0;
-  if (settings.tint < 0.35) settings.tint = 0.55;
+  settings.tint = 0.02;
 
   const showView = mountViews();
-  showView(stored && stored[VIEW_KEY] === "controls" ? "controls" : "chat");
+  showView(stored && stored[VIEW_KEY] === "history" ? "history" : "chat");
 
   applyTint();
   engine = window.LiquidGlass.refract(host, {
@@ -469,5 +566,9 @@ if (typeof ResizeObserver !== "undefined") {
 
   sliders.forEach((handle, key) => handle.set(settings[key], false));
 
-  mountChat();
+  const mounted = mountChat();
+  if (mounted) {
+    await mounted.hydrate().catch(() => {});
+    mountHistory(mounted.chat, showView);
+  }
 })();

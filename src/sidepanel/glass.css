@@ -11,7 +11,7 @@
   --lg-inset: 9px;
   --lg-radius-inner: calc(var(--lg-radius) - var(--lg-inset));
 
-  --lg-tint: rgba(34, 34, 38, 0.32);
+  --lg-tint: rgba(34, 34, 38, 0.02);
   --lg-fg: hsl(0 0% 98%);
   --lg-muted: rgba(255, 255, 255, 0.66);
   --lg-divider: rgba(255, 255, 255, 0.1);
@@ -34,7 +34,7 @@
 
 :root.lg-light {
   color-scheme: light;
-  --lg-tint: rgba(248, 248, 250, 0.38);
+  --lg-tint: rgba(248, 248, 250, 0.02);
   --lg-fg: hsl(0 0% 12%);
   --lg-muted: hsl(0 0% 42%);
   --lg-divider: rgba(0, 0, 0, 0.09);
