@@ -73,8 +73,8 @@
           <div class="chat lg-scroll" id="chat">
             <div class="chat__empty" id="chat-empty" hidden>
               <strong>Liquid Glass</strong>
-            Ask anything.
-          </div>
+              Ask anything. This panel is a shell, so replies are canned.
+            </div>
           </div>
           <form class="composer" id="composer">
             <div class="composer__row">
@@ -116,10 +116,10 @@
           <section class="lg-surface card">
             <div class="lg-row">
               <span class="side">
-                <span class="lg-dot lg-dot--ok" id="dot"></span>
-                <span class="lg-label">Glass</span>
+                <span class="lg-dot lg-dot--warn" id="dot"></span>
+                <span class="lg-label">Source</span>
               </span>
-              <span class="lg-sub" id="source">black panel</span>
+              <span class="lg-sub" id="source">not capturing</span>
             </div>
             <div class="lg-row">
               <span class="lg-label">Optics</span>
@@ -146,13 +146,13 @@
               <output class="lg-field__out">2</output>
             </div>
 
-            <div class="lg-field" id="tint" data-key="tint" data-min="0.02" data-max="0.8" data-step="0.01" data-value="0.55" tabindex="0" role="slider" aria-label="Tint">
+            <div class="lg-field" id="tint" data-key="tint" data-min="0.02" data-max="0.8" data-step="0.01" data-value="0.08" tabindex="0" role="slider" aria-label="Tint">
               <span class="lg-field__label">Tint</span>
               <div class="lg-slider">
                 <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
                 <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
               </div>
-              <output class="lg-field__out">0.55</output>
+              <output class="lg-field__out">0.08</output>
             </div>
 
             <div class="lg-field" id="fringe" data-key="fringe" data-min="0" data-max="6" data-step="0.5" data-value="0" tabindex="0" role="slider" aria-label="Fringe">
@@ -164,41 +164,33 @@
               <output class="lg-field__out">0</output>
             </div>
 
-            <div class="lg-field" id="dim" data-key="dim" data-min="0" data-max="0.7" data-step="0.02" data-value="0" tabindex="0" role="slider" aria-label="Dim">
+            <div class="lg-field" id="dim" data-key="dim" data-min="0" data-max="0.7" data-step="0.02" data-value="0.4" tabindex="0" role="slider" aria-label="Dim">
               <span class="lg-field__label">Dim</span>
               <div class="lg-slider">
                 <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
                 <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
               </div>
-              <output class="lg-field__out">0</output>
+              <output class="lg-field__out">0.4</output>
             </div>
           </section>
 
-          <section class="lg-surface card" id="settings-panel">
-            <div class="lg-row">
-              <label class="lg-label" for="model">Model</label>
-              <select id="model">
-                <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-                <option value="glm-5.3">glm-5.3</option>
-              </select>
-            </div>
-            <div class="lg-row">
-              <label class="lg-label" for="api-key">API key</label>
-              <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" />
-            </div>
-            <div class="lg-row">
-              <label class="lg-label" for="base-url">Base URL</label>
-              <input id="base-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:8787/v1" />
-            </div>
-          </section>
+          <div class="actions">
+            <button class="lg-btn" id="recapture" type="button"><span>Recapture</span></button>
+            <button class="lg-btn lg-btn--prominent" id="toggle" type="button"><span>Stop</span></button>
+          </div>
 
           <p class="note" id="note">
-            Liquid glass on the black panel. Refraction stays on the rim so the chat stays readable.
+            Live capture of the tab. The glass refracts it at the rim and the interior stays
+            clean.
           </p>
         </section>
       </div>
     </main>
 
-    <script type="module" src="./sidepanel.js"></script>
+    <script src="refraction.js"></script>
+    <script src="glass-slider.js"></script>
+    <script src="glass-chat.js"></script>
+    <script src="glass-cover.js"></script>
+    <script src="sidepanel.js"></script>
   </body>
 </html>

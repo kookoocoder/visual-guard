@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en" class="lg-dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Liquid Glass</title>
+    <link rel="stylesheet" href="glass.css" />
+    <link rel="stylesheet" href="glass-ui.css" />
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        padding: 26px;
+        box-sizing: border-box;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable",
+          "Segoe UI", system-ui, sans-serif;
+        background-image: url("https://images.unsplash.com/photo-1579380656108-f98e4df8ea62?q=80&w=1600&auto=format&fit=crop");
+        background-size: cover;
+        background-position: center;
+      }
+
+      .stage {
+        width: min(820px, 94vw);
+        display: grid;
+        gap: 18px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        align-items: start;
+      }
+
+      .bar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .bar span {
+        color: #eef2f7;
+        font-size: 11px;
+        opacity: 0.9;
+        line-height: 1.5;
+      }
+
+      .prism {
+        height: 104px;
+        border-radius: 12px;
+        background: repeating-linear-gradient(90deg, #f5f7fa 0 6px, #0b0d10 6px 12px);
+      }
+
+      .card {
+        padding: 12px 14px;
+      }
+
+      .scrollbox {
+        height: 118px;
+        overflow-y: auto;
+        padding: 10px 13px;
+        font-size: 11.5px;
+        color: var(--lg-muted);
+        line-height: 1.75;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 9px;
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <div class="bar">
+        <button class="lg-btn" id="theme"><span>Theme: dark</span></button>
+        <span
+          >Rim kinks straight edges behind the panel and the interior stays clean. Buttons,
+          sections, sliders and scrollbars use the same bead: crisp high-alpha rim, tight
+          dark inner ring, 45&#176; specular, radial lens on the thumb.</span
+        >
+      </div>
+
+      <div class="row">
+        <div class="lg" id="card-a">
+          <div class="lg-grain"></div>
+          <div class="lg-body">
+            <p class="lg-title">Refraction <span class="lg-pill">edge-local</span></p>
+            <div class="prism"></div>
+            <section class="lg-surface" style="padding: 9px 13px; margin-top: 12px">
+              <div class="lg-row">
+                <span class="lg-label">Peak</span>
+                <span class="lg-sub">2.008 &#215; 0.524 &#215; bezel</span>
+              </div>
+              <div class="lg-row">
+                <span class="lg-label">Interior</span>
+                <span class="lg-sub">neutral, no warp</span>
+              </div>
+            </section>
+            <div class="actions">
+              <button class="lg-btn"><span>Glass</span></button>
+              <button class="lg-btn lg-btn--danger"><span>Danger</span></button>
+              <button class="lg-btn lg-btn--prominent"><span>Prominent</span></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="lg" id="card-b">
+          <div class="lg-body">
+            <p class="lg-title">Controls</p>
+            <section class="lg-surface" style="padding: 9px 13px">
+              <div class="lg-field" id="refraction" data-key="refraction" data-min="0" data-max="250" data-step="5" data-value="100" tabindex="0" role="slider" aria-label="Refraction">
+                <span class="lg-field__label">Refraction</span>
+                <div class="lg-slider">
+                  <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
+                  <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
+                </div>
+                <output class="lg-field__out">100</output>
+              </div>
+              <div class="lg-field" id="blur" data-key="blur" data-min="0" data-max="16" data-step="0.5" data-value="2" tabindex="0" role="slider" aria-label="Blur">
+                <span class="lg-field__label">Blur</span>
+                <div class="lg-slider">
+                  <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
+                  <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
+                </div>
+                <output class="lg-field__out">2</output>
+              </div>
+              <div class="lg-field" id="fringe" data-key="fringe" data-min="0" data-max="6" data-step="0.5" data-value="0" tabindex="0" role="slider" aria-label="Fringe">
+                <span class="lg-field__label">Fringe</span>
+                <div class="lg-slider">
+                  <div class="lg-slider__liquids"><div class="lg-slider__fill"></div><div class="lg-slider__blob"></div></div>
+                  <div class="lg-slider__thumb"><i class="lg-slider__lens"></i><i class="lg-slider__sheen"></i><i class="lg-slider__spec"></i></div>
+                </div>
+                <output class="lg-field__out">0</output>
+              </div>
+            </section>
+            <section class="lg-surface scrollbox lg-scroll" style="margin-top: 11px">
+              Glass scrollbar: scroll me. The thumb is a translucent rail with a lit rim and a
+              dark inner edge, so it belongs to the material. Repeat. Repeat. Repeat. Repeat.
+              Repeat. Repeat. Repeat.
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <svg class="lg-defs" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="lg-goo">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" />
+          <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 16 -7" result="goo" />
+          <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+        </filter>
+        <filter id="lg-lens" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB">
+          <feImage x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="map" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><radialGradient id='m' cx='50%25' cy='50%25' r='70%25'><stop offset='0%25' stop-color='rgb(128,128,255)'/><stop offset='85%25' stop-color='rgb(255,255,255)'/></radialGradient><rect width='120' height='120' fill='url(%23m)'/></svg>" />
+          <feDisplacementMap in="SourceGraphic" in2="map" scale="-60" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </defs>
+    </svg>
+
+    <script src="refraction.js"></script>
+    <script src="glass-slider.js"></script>
+    <script>
+      (function () {
+        const cards = [document.getElementById("card-a"), document.getElementById("card-b")];
+        const values = { refraction: 100, blur: 2, fringe: 0 };
+        const sliders = new Map();
+        let dark = true;
+
+        function apply() {
+          cards.forEach(function (card) {
+            window.LiquidGlass.refract(card).update({
+              ratio: values.refraction / 100,
+              blur: values.blur,
+              chroma: values.fringe,
+              saturate: 180,
+              brightness: 1.06,
+              contrast: 1.04,
+            });
+          });
+        }
+
+        document.querySelectorAll(".lg-field").forEach(function (field) {
+          const key = field.dataset.key;
+          sliders.set(
+            key,
+            window.LiquidGlassSlider.mount(field, function (value) {
+              values[key] = value;
+              apply();
+            })
+          );
+        });
+
+        document.getElementById("theme").addEventListener("click", function () {
+          dark = !dark;
+          document.documentElement.classList.toggle("lg-light", !dark);
+          this.querySelector("span").textContent = dark ? "Theme: dark" : "Theme: light";
+          apply();
+        });
+
+        apply();
+      })();
+    </script>
+  </body>
+</html>

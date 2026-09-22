@@ -506,39 +506,80 @@
 
   function typeElement(selectorRef, text) {
     const element = resolve(selectorRef);
-    const kind = sensitiveKind(element);
-    if (kind) {
+    const target = editableTarget(element);
+    if (!isEditable(target)) {
+      throw new Error("The selected element is not editable.");
+    }
+    const blocked = sensitiveKind(target);
+    if (blocked === "password" || blocked === "card" || blocked === "secret") {
       throw new Error("Typing into sensitive fields is blocked.");
     }
 
-    const editable =
-      element instanceof HTMLInputElement ||
+    target.scrollIntoView({ block: "center", inline: "nearest" });
+    writeText(target, text);
+    return { action: "type", ref: selectorRef, text, label: getLabel(target) || "element" };
+  }
+
+  function isEditable(element) {
+    if (!element) return false;
+    if (element instanceof HTMLInputElement) {
+      const type = (element.getAttribute("type") || "text").toLowerCase();
+      return !["button", "submit", "reset", "checkbox", "radio", "file", "hidden", "image"].includes(type);
+    }
+    return (
       element instanceof HTMLTextAreaElement ||
       element.isContentEditable ||
-      element.getAttribute("role") === "textbox";
+      element.getAttribute("contenteditable") === "true" ||
+      element.getAttribute("role") === "textbox"
+    );
+  }
 
-    if (!editable) {
-      throw new Error("The selected element is not editable.");
-    }
+  function editableTarget(element) {
+    if (isEditable(element)) return element;
+    const nested = element.querySelector?.(
+      "textarea, [contenteditable='true'], [role='textbox'], input:not([type='hidden']):not([type='radio']):not([type='checkbox']):not([type='submit']):not([type='button']):not([type='file'])",
+    );
+    if (isEditable(nested)) return nested;
+    if (element instanceof HTMLLabelElement && isEditable(element.control)) return element.control;
+    return element;
+  }
 
-    element.scrollIntoView({ block: "center", inline: "nearest" });
+  function writeText(element, text) {
+    const doc = element.ownerDocument || document;
     try {
       element.focus({ preventScroll: true });
     } catch {
       element.focus();
     }
 
-    if (element.isContentEditable) {
-      element.textContent = text;
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }));
-    } else {
-      dispatchInput(element, text);
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      try {
+        element.select();
+      } catch {
+        // Some input types cannot select.
+      }
+      const inserted = Boolean(doc.execCommand?.("insertText", false, text)) && element.value === text;
+      if (!inserted) dispatchInput(element, text);
+      return;
     }
-    return { action: "type", ref: selectorRef, text, label: getLabel(element) || "element" };
+
+    const selection = (doc.defaultView || window).getSelection?.();
+    if (selection) {
+      const range = doc.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    if (!doc.execCommand?.("insertText", false, text)) {
+      element.textContent = text;
+      element.dispatchEvent(
+        new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }),
+      );
+    }
   }
 
   function pressKey(selectorRef, key) {
-    const element = resolve(selectorRef);
+    const element = editableTarget(resolve(selectorRef));
     const allowed = new Set(["Enter", "Escape", "Tab"]);
     if (!allowed.has(key)) throw new Error(`Unsupported key: ${key}`);
 

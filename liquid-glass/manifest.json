@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Liquid Glass",
+  "version": "4.0.0",
+  "description": "Apple Liquid Glass side panel: ray-traced rim refraction over a live capture of the tab.",
+  "minimum_chrome_version": "116",
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Liquid Glass"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["sidePanel", "tabCapture", "activeTab", "storage", "scripting"],
+  "host_permissions": ["<all_urls>"]
+}

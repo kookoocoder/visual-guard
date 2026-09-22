@@ -9,17 +9,10 @@ body {
   padding: 16px;
   box-sizing: border-box;
   overflow: hidden;
-  background: #000;
+  background: #0a0a0b;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
     system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-}
-
-#stage,
-#veil,
-#feed,
-#still {
-  display: none;
 }
 
 #stage {
@@ -27,11 +20,10 @@ body {
   inset: 0;
   z-index: 0;
   overflow: hidden;
-  background: #000;
+  background: #0a0a0b;
 }
 
-#feed,
-#still {
+#feed {
   position: absolute;
   left: 0;
   top: 0;
@@ -39,10 +31,6 @@ body {
   height: 100%;
   object-fit: cover;
   object-position: 100% 50%;
-}
-
-#feed.is-off {
-  visibility: hidden;
 }
 
 #veil {
@@ -146,17 +134,4 @@ main.lg .lg-body {
 
 #state.bad {
   color: var(--lg-warn);
-}
-
-.lg-row select,
-.lg-row input {
-  width: 58%;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--lg-fg);
-  font: inherit;
-  font-size: 11px;
-  text-align: right;
-  outline: none;
 }

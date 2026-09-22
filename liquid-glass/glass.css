@@ -1,0 +1,199 @@
+:root {
+  color-scheme: dark;
+
+  --lg-blur: 2px;
+  --lg-sat: 180%;
+  --lg-brightness: 1.06;
+  --lg-contrast: 1.04;
+
+  --lg-radius: 24px;
+  --lg-pad: 14px;
+  --lg-inset: 9px;
+  --lg-radius-inner: calc(var(--lg-radius) - var(--lg-inset));
+
+  --lg-tint: rgba(34, 34, 38, 0.32);
+  --lg-fg: hsl(0 0% 98%);
+  --lg-muted: rgba(255, 255, 255, 0.66);
+  --lg-divider: rgba(255, 255, 255, 0.1);
+  --lg-well: rgba(0, 0, 0, 0.26);
+
+  --lg-rim-hi: rgba(255, 255, 255, 0.9);
+  --lg-rim-mid: rgba(255, 255, 255, 0.55);
+  --lg-rim-lo: rgba(255, 255, 255, 0.3);
+  --lg-ring: rgba(0, 0, 0, 0.75);
+  --lg-sheen: rgba(255, 255, 255, 0.12);
+  --lg-outer: 0 16px 40px -16px rgba(0, 0, 0, 0.66);
+  --lg-spring: linear(0, 0.42 11%, 1.14 33%, 0.96 54%, 1.02 71%, 1 100%);
+
+  --lg-accent-a: #5eb0ff;
+  --lg-accent-b: #2f7ae5;
+  --lg-danger: hsl(4 86% 68%);
+  --lg-ok: hsl(126 62% 64%);
+  --lg-warn: hsl(25 88% 66%);
+}
+
+:root.lg-light {
+  color-scheme: light;
+  --lg-tint: rgba(248, 248, 250, 0.38);
+  --lg-fg: hsl(0 0% 12%);
+  --lg-muted: hsl(0 0% 42%);
+  --lg-divider: rgba(0, 0, 0, 0.09);
+  --lg-well: rgba(0, 0, 0, 0.07);
+  --lg-rim-hi: rgba(255, 255, 255, 0.95);
+  --lg-rim-mid: rgba(255, 255, 255, 0.7);
+  --lg-rim-lo: rgba(255, 255, 255, 0.5);
+  --lg-ring: rgba(0, 0, 0, 0.28);
+  --lg-sheen: rgba(255, 255, 255, 0.55);
+  --lg-outer: 0 16px 40px -16px rgba(0, 0, 0, 0.3);
+  --lg-danger: hsl(4 74% 46%);
+  --lg-ok: hsl(126 58% 32%);
+  --lg-warn: hsl(25 84% 40%);
+}
+
+.lg,
+.lg *,
+.lg-surface * {
+  box-sizing: border-box;
+}
+
+.lg {
+  position: relative;
+  border-radius: var(--lg-radius);
+  color: var(--lg-fg);
+  background-color: var(--lg-tint);
+  corner-shape: squircle;
+  -webkit-backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat))
+    brightness(var(--lg-brightness)) contrast(var(--lg-contrast));
+  backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat))
+    brightness(var(--lg-brightness)) contrast(var(--lg-contrast));
+  box-shadow:
+    inset 0 1px 0 var(--lg-rim-hi),
+    inset 0 -1px 0 var(--lg-rim-mid),
+    inset 1px 0 0 var(--lg-rim-lo),
+    inset -1px 0 0 var(--lg-rim-lo),
+    inset 0 0 3px var(--lg-ring),
+    var(--lg-outer);
+  border: 0;
+  overflow: hidden;
+}
+
+.lg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, var(--lg-sheen) 0%, transparent 42%);
+}
+
+.lg--clear {
+  --lg-tint: rgba(28, 28, 32, 0.18);
+}
+
+:root.lg-light .lg--clear {
+  --lg-tint: rgba(255, 255, 255, 0.26);
+}
+
+.lg-body {
+  position: relative;
+  z-index: 1;
+  padding: var(--lg-pad);
+}
+
+.lg-grain {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.022;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.lg-title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px;
+}
+
+.lg-label {
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+.lg-sub {
+  font-size: 11px;
+  color: var(--lg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.lg-row + .lg-row {
+  border-top: 1px solid var(--lg-divider);
+}
+
+.lg-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 0 7px -1px currentColor;
+}
+
+.lg-dot--ok {
+  background: var(--lg-ok);
+  color: var(--lg-ok);
+}
+
+.lg-dot--warn {
+  background: var(--lg-warn);
+  color: var(--lg-warn);
+}
+
+.lg-dot--danger {
+  background: var(--lg-danger);
+  color: var(--lg-danger);
+}
+
+.lg-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --lg-tint: rgba(28, 28, 32, 0.94);
+  }
+
+  :root.lg-light {
+    --lg-tint: rgba(244, 244, 247, 0.96);
+  }
+
+  .lg {
+    -webkit-backdrop-filter: blur(18px) saturate(120%);
+    backdrop-filter: blur(18px) saturate(120%);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --lg-tint: rgba(28, 28, 32, 0.94);
+  }
+
+  :root.lg-light {
+    --lg-tint: rgba(244, 244, 247, 0.96);
+  }
+}

@@ -49,4 +49,11 @@ Evidence rules:
 - If a tool reports "Duplicate submission blocked", stop retrying that message. It means the extension already submitted the exact content recently.
 - A short follow-up such as "retry", "continue", or "do it" refers to the preceding run in conversation history.
 
-Prefer the fewest tool calls that complete the user task. When done, reply with a short final answer and no further tool calls.`;
+Prefer the fewest tool calls that complete the user task. When done, reply with a short final answer and no further tool calls.
+
+Reply format: the side panel renders a narrow column. Every final answer uses the same shape.
+- Open with one short sentence that states the result.
+- When there are steps, findings, or options, follow with a list. Use "- " for facts and "1. " for ordered steps, one item per line.
+- Use **bold** only for a short label, and \`backticks\` for refs, URLs, commands, and field values.
+- Separate paragraphs with a blank line. Use a fenced code block only when the user needs a snippet.
+- Do not use HTML, images, or # headings. Prefer a list over a table.`;

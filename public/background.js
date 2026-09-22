@@ -88,10 +88,19 @@ async function ensureContentScript(tabId) {
   try {
     await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId: 0 });
   } catch {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ["content.js"],
-    });
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        files: ["content.js"],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/chrome-extension:\/\//i.test(message)) throw error;
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"],
+      });
+    }
   }
 }
 
@@ -279,19 +288,39 @@ async function executeTool(tool, tab) {
       if (tool.key === "Enter" && focused.result?.value) {
         const claim = await claimSubmission(tab.id, focused.result.value);
         if (!claim.ok) return claim;
-        // Reinsert through CDP so React/Slate sees the same text in its internal
-        // editor state, even if an earlier extension build mutated only the DOM.
-        await dispatchTrustedText(tab.id, focused.result.value);
       }
-      return dispatchTrustedKey(tab.id, tool.key);
+      const pressed = await sendToFrame(tab.id, frameId, {
+        type: "PRESS_KEY",
+        selectorRef: localRef,
+        key: tool.key,
+      });
+      if (pressed?.ok) return pressed;
+      try {
+        return { ok: true, result: await dispatchTrustedKey(tab.id, tool.key) };
+      } catch (error) {
+        throw new Error(pressed?.error || (error instanceof Error ? error.message : String(error)));
+      }
     }
     case "type": {
       await activateTab(tab);
       await ensureContentScript(tab.id);
       const { frameId, localRef } = parseFrameRef(tool.selector_ref);
-      const focused = await sendToFrame(tab.id, frameId, { type: "FOCUS", selectorRef: localRef });
-      if (!focused?.ok) throw new Error(focused?.error || "Unable to focus the target element.");
-      return dispatchTrustedText(tab.id, tool.text);
+      const typed = await sendToFrame(tab.id, frameId, {
+        type: "TYPE",
+        selectorRef: localRef,
+        text: String(tool.text ?? ""),
+      });
+      if (typed?.ok) return typed;
+      const reason = typed?.error || "Unable to type into the target element.";
+      if (/blocked|no longer on the page|not editable/i.test(reason)) throw new Error(reason);
+      try {
+        const focused = await sendToFrame(tab.id, frameId, { type: "FOCUS", selectorRef: localRef });
+        if (!focused?.ok) throw new Error(focused?.error || reason);
+        await dispatchTrustedText(tab.id, tool.text);
+        return { ok: true, result: { action: "type", text: String(tool.text ?? ""), trusted: true } };
+      } catch (error) {
+        throw new Error(reason || (error instanceof Error ? error.message : String(error)));
+      }
     }
     case "submit": {
       await activateTab(tab);
@@ -378,20 +407,34 @@ async function executeTool(tool, tab) {
   }
 }
 
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab || tab.id == null) return;
+  try {
+    await chrome.sidePanel.open({ tabId: tab.id });
+  } catch {
+    // The panel may already be open for this tab.
+  }
+  try {
+    await chrome.runtime.sendMessage({ type: "lg:activate", tabId: tab.id });
+  } catch {
+    // The panel script registers its listener after it loads.
+  }
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
+    .setPanelBehavior({ openPanelOnActionClick: false })
     .catch((error) => console.warn("Unable to configure side panel", error));
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
+    .setPanelBehavior({ openPanelOnActionClick: false })
     .catch((error) => console.warn("Unable to configure side panel", error));
 });
 
 chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: true })
+  .setPanelBehavior({ openPanelOnActionClick: false })
   .catch((error) => console.warn("Unable to configure side panel", error));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
