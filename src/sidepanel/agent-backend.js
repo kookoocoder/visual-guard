@@ -89,9 +89,8 @@ export async function listChatHistory() {
 
 export async function hydrateChatHistory(chat) {
   await migrateSessionHistory();
-  const [latest] = await listConversations();
-  if (latest) applyConversation(latest, chat);
-  else applyConversation(null, chat);
+  // Side panel open always lands on a blank new chat; history is opt-in.
+  applyConversation(null, chat);
 }
 
 export function openChatHistory(record, chat) {

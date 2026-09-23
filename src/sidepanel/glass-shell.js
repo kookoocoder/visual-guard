@@ -545,7 +545,8 @@ if (typeof ResizeObserver !== "undefined") {
   settings.tint = 0.02;
 
   const showView = mountViews();
-  showView(stored && stored[VIEW_KEY] === "history" ? "history" : "chat");
+  // Always open on Chat (new conversation); History is available via the tab.
+  showView("chat");
 
   applyTint();
   engine = window.LiquidGlass.refract(host, {

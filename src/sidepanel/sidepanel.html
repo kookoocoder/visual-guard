@@ -107,7 +107,13 @@
                 <i class="chip__dot"></i>
                 <span>Confirm each step</span>
               </button>
-              <span class="composer__hint">Enter to send</span>
+              <label class="composer__model">
+                <span class="composer__model-label">Model</span>
+                <select id="model" aria-label="Chat model">
+                  <option value="deepseek-v4-flash">deepseek-v4-flash (API)</option>
+                  <option value="glm-5.3">glm-5.3 (API)</option>
+                </select>
+              </label>
             </div>
           </form>
         </section>
@@ -124,10 +130,6 @@
     </main>
 
     <div hidden>
-      <select id="model" aria-hidden="true" tabindex="-1">
-        <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-        <option value="glm-5.3">glm-5.3</option>
-      </select>
       <input id="api-key" type="password" autocomplete="off" spellcheck="false" tabindex="-1" />
       <input id="base-url" type="url" spellcheck="false" tabindex="-1" />
     </div>

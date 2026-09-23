@@ -892,6 +892,61 @@
   align-items: center;
   gap: 6px;
   padding-bottom: 2px;
+  flex-wrap: wrap;
+}
+
+.composer__model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.composer__model-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--lg-muted);
+  flex: none;
+}
+
+.composer__model select {
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: min(220px, 56vw);
+  border: 0;
+  border-radius: 999px;
+  padding: 3px 26px 3px 10px;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--lg-fg);
+  background-color: rgba(255, 255, 255, 0.05);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa3b5' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+  box-shadow:
+    inset 1px 1px 0 -0.5px var(--lg-rim-mid),
+    inset -1px -1px 0 -0.5px var(--lg-rim-lo),
+    inset 0 0 2px var(--lg-ring);
+  cursor: pointer;
+}
+
+.composer__model select:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.composer__model select:focus-visible {
+  outline: 2px solid var(--lg-accent-a);
+  outline-offset: 1px;
+}
+
+.composer__model select option {
+  color: #111;
+  background: #fff;
 }
 
 .chip {
